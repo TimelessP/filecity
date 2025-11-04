@@ -238,10 +238,26 @@ class FileCity {
                 return;
             }
             const sensitivity = 0.0025;
-            this.yaw -= event.movementX * sensitivity;
-            this.pitch -= event.movementY * sensitivity;
+            const cosRoll = Math.cos(this.roll);
+            const sinRoll = Math.sin(this.roll);
+            const deltaYaw = (-(event.movementX * cosRoll) + (event.movementY * sinRoll)) * sensitivity;
+            const deltaPitch = (-(event.movementY * cosRoll) - (event.movementX * sinRoll)) * sensitivity;
+            this.yaw += deltaYaw;
+            this.pitch += deltaPitch;
             this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
         });
+
+        document.addEventListener('wheel', (event) => {
+            if (!this.camera) {
+                return;
+            }
+            event.preventDefault();
+            const zoomSpeed = 0.0025;
+            const delta = event.deltaY * zoomSpeed;
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+            this.camera.position.addScaledVector(forward, delta);
+            this.updateDisplayedCoordinates();
+        }, { passive: false });
 
         document.addEventListener('click', (event) => {
             if (event.button !== 0) {
@@ -1102,7 +1118,7 @@ class FileCity {
         const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * this.camera.aspect);
         const verticalDistance = halfSize / Math.tan(verticalFov / 2);
         const horizontalDistance = halfSize / Math.tan(horizontalFov / 2);
-        const paddingFactor = 1.1;
+    const paddingFactor = 1.22;
         const distance = Math.max(verticalDistance, horizontalDistance) * paddingFactor;
 
         const targetPosition = cubeWorldPos.clone().add(offsetDirection.multiplyScalar(distance));
@@ -1551,9 +1567,18 @@ class FileCity {
         movement.addScaledVector(up, this.camera_velocity.y);
 
         this.camera.position.add(movement);
+        this.updateDisplayedCoordinates();
+    }
 
-        document.getElementById('coordinates').textContent =
-            `${this.camera.position.x.toFixed(1)}, ${this.camera.position.y.toFixed(1)}, ${this.camera.position.z.toFixed(1)}`;
+    updateDisplayedCoordinates() {
+        if (!this.camera) {
+            return;
+        }
+        const element = document.getElementById('coordinates');
+        if (!element) {
+            return;
+        }
+        element.textContent = `${this.camera.position.x.toFixed(1)}, ${this.camera.position.y.toFixed(1)}, ${this.camera.position.z.toFixed(1)}`;
     }
 
     updateParticles() {
