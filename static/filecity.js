@@ -49,8 +49,12 @@ class FileCity {
     this.activeMedia = null; // 'audio' | 'video'
     this.audioElement = null;
     this.videoElement = null;
-    this.videoTexture = null;
-    this.videoTextureSide = null;
+    this.videoCanvas = null;
+    this.videoCanvasCtx = null;
+    this.videoCanvasTexture = null;
+    this.videoRimCanvas = null;
+    this.videoRimCtx = null;
+    this.videoRimTexture = null;
     this.mediaBuilding = null;
     this.directoryToken = 0;
     this.pendingVideoHandlers = null;
@@ -218,23 +222,29 @@ class FileCity {
         this.videoElement.style.display = 'none';
         document.body.appendChild(this.videoElement);
 
-        this.videoTexture = new THREE.VideoTexture(this.videoElement);
-        this.videoTexture.encoding = THREE.sRGBEncoding;
-        this.videoTexture.needsUpdate = false;
-        this.videoTexture.minFilter = THREE.LinearFilter;
-        this.videoTexture.magFilter = THREE.LinearFilter;
-        this.videoTexture.generateMipmaps = false;
-    this.videoTexture.wrapS = THREE.ClampToEdgeWrapping;
-    this.videoTexture.wrapT = THREE.ClampToEdgeWrapping;
+        this.videoCanvas = document.createElement('canvas');
+        this.videoCanvas.width = 512;
+        this.videoCanvas.height = 512;
+        this.videoCanvasCtx = this.videoCanvas.getContext('2d');
+        this.videoCanvasTexture = new THREE.CanvasTexture(this.videoCanvas);
+        this.videoCanvasTexture.encoding = THREE.sRGBEncoding;
+        this.videoCanvasTexture.needsUpdate = false;
+        this.videoCanvasTexture.magFilter = THREE.LinearFilter;
+        this.videoCanvasTexture.minFilter = THREE.LinearFilter;
+        this.videoCanvasTexture.wrapS = THREE.ClampToEdgeWrapping;
+        this.videoCanvasTexture.wrapT = THREE.ClampToEdgeWrapping;
 
-    this.videoTextureSide = new THREE.VideoTexture(this.videoElement);
-    this.videoTextureSide.encoding = THREE.sRGBEncoding;
-    this.videoTextureSide.needsUpdate = false;
-    this.videoTextureSide.minFilter = THREE.LinearFilter;
-    this.videoTextureSide.magFilter = THREE.LinearFilter;
-    this.videoTextureSide.generateMipmaps = false;
-    this.videoTextureSide.wrapS = THREE.ClampToEdgeWrapping;
-    this.videoTextureSide.wrapT = THREE.ClampToEdgeWrapping;
+        this.videoRimCanvas = document.createElement('canvas');
+        this.videoRimCanvas.width = 512;
+        this.videoRimCanvas.height = 128;
+        this.videoRimCtx = this.videoRimCanvas.getContext('2d');
+        this.videoRimTexture = new THREE.CanvasTexture(this.videoRimCanvas);
+        this.videoRimTexture.encoding = THREE.sRGBEncoding;
+        this.videoRimTexture.needsUpdate = false;
+        this.videoRimTexture.magFilter = THREE.LinearFilter;
+        this.videoRimTexture.minFilter = THREE.LinearFilter;
+        this.videoRimTexture.wrapS = THREE.ClampToEdgeWrapping;
+        this.videoRimTexture.wrapT = THREE.ClampToEdgeWrapping;
     }
     
     requestPointerLock() {
@@ -357,7 +367,7 @@ class FileCity {
                 if (child.material) {
                     const materials = Array.isArray(child.material) ? child.material : [child.material];
                     materials.forEach(material => {
-                        if (material.map && material.map !== this.ghostTexture && material.map !== this.directoryTexture && material.map !== this.videoTexture && material.map !== this.videoTextureSide) {
+                        if (material.map && material.map !== this.ghostTexture && material.map !== this.directoryTexture && material.map !== this.videoCanvasTexture && material.map !== this.videoRimTexture) {
                             material.map.dispose();
                         }
                         material.map = null;
@@ -554,15 +564,19 @@ class FileCity {
     }
 
     setRimTexture(building, sourceTexture, options = {}) {
-        const { rimMaterial, rimHeight, width, previousRimMap } = building.userData;
+        const { rimMaterial, rimHeight, width } = building.userData;
         if (!rimMaterial) {
             return;
         }
 
-        const { clone = true, preserveCurrent = false } = options;
-        const currentMap = rimMaterial.map;
-        if (!preserveCurrent && currentMap && currentMap !== this.videoTextureSide && currentMap !== previousRimMap && typeof currentMap.dispose === 'function') {
-            currentMap.dispose();
+        const { clone = true, preserveCurrent = false, video = false } = options;
+
+        if (!preserveCurrent) {
+            const existing = building.userData.rimGeneratedTexture;
+            if (existing && existing !== this.videoRimTexture && typeof existing.dispose === 'function') {
+                existing.dispose();
+            }
+            building.userData.rimGeneratedTexture = null;
         }
 
         if (!sourceTexture) {
@@ -571,45 +585,230 @@ class FileCity {
             return;
         }
 
+        const isVideoTexture = video || sourceTexture === this.videoCanvasTexture || sourceTexture === this.videoRimTexture || (sourceTexture && (sourceTexture.isVideoTexture || (sourceTexture.image && sourceTexture.image.tagName === 'VIDEO')));
+        if (isVideoTexture) {
+            const allowFrame = this.activeMedia === 'video' && this.mediaBuilding === building;
+            this.prepareVideoRimCanvas(width, rimHeight, allowFrame);
+            rimMaterial.map = this.videoRimTexture;
+            rimMaterial.opacity = 1;
+            rimMaterial.needsUpdate = true;
+            building.userData.rimGeneratedTexture = this.videoRimTexture;
+            return;
+        }
+
         let rimTexture = sourceTexture;
         if (clone) {
-            rimTexture = sourceTexture.clone();
-            rimTexture.image = sourceTexture.image;
-            rimTexture.needsUpdate = true;
-            rimTexture.encoding = sourceTexture.encoding;
-            rimTexture.anisotropy = sourceTexture.anisotropy;
-            rimTexture.magFilter = sourceTexture.magFilter;
-            rimTexture.minFilter = sourceTexture.minFilter;
-            rimTexture.generateMipmaps = sourceTexture.generateMipmaps;
-            rimTexture.flipY = sourceTexture.flipY;
+            rimTexture = this.createRimCanvasTexture(sourceTexture, width, rimHeight);
         }
 
-        const widthValue = width || 1;
-        const heightValue = rimHeight || 1;
-        let repeatX = 1;
-        let repeatY = 1;
-        if (widthValue >= heightValue) {
-            const scale = Math.max(0.0001, heightValue / widthValue);
-            repeatX = scale;
-        } else {
-            const scale = Math.max(0.0001, widthValue / heightValue);
-            repeatY = scale;
+        if (!rimTexture) {
+            rimMaterial.map = null;
+            rimMaterial.needsUpdate = true;
+            return;
         }
 
-        rimTexture.wrapS = THREE.ClampToEdgeWrapping;
-        rimTexture.wrapT = THREE.ClampToEdgeWrapping;
-        rimTexture.center.set(0.5, 0.5);
-        rimTexture.repeat.set(repeatX, repeatY);
-        rimTexture.offset.set((1 - repeatX) / 2, (1 - repeatY) / 2);
-
-        if (this.renderer) {
-            rimTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
-        }
-
-        rimTexture.needsUpdate = true;
         rimMaterial.map = rimTexture;
         rimMaterial.opacity = 1;
         rimMaterial.needsUpdate = true;
+
+        if (clone) {
+            building.userData.rimGeneratedTexture = rimTexture;
+        }
+    }
+
+    getTextureImage(texture) {
+        if (!texture) {
+            return null;
+        }
+        if (texture.image) {
+            return texture.image;
+        }
+        if (texture.source && texture.source.data) {
+            return texture.source.data;
+        }
+        return null;
+    }
+
+    getSourceDimensions(source) {
+        if (!source) {
+            return null;
+        }
+        const width = source.videoWidth || source.naturalWidth || source.width || (source.image && source.image.width) || (source.data && source.data.width) || 0;
+        const height = source.videoHeight || source.naturalHeight || source.height || (source.image && source.image.height) || (source.data && source.data.height) || 0;
+        if (width > 0 && height > 0) {
+            return { width, height };
+        }
+        return null;
+    }
+
+    // Letterbox arbitrary media into the target canvas to avoid stretching.
+    drawSourceToCanvas(source, canvas, ctx, options = {}) {
+        const { background = 'rgba(0, 0, 0, 1)', padding = 0, stroke = null, strokeWidth = 2, gradient = null } = options;
+        if (!ctx || !canvas) {
+            return false;
+        }
+
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (background) {
+            ctx.fillStyle = background;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        const dims = this.getSourceDimensions(source);
+        if (dims) {
+            const { width, height } = dims;
+            const innerWidth = Math.max(1, canvas.width - padding * 2);
+            const innerHeight = Math.max(1, canvas.height - padding * 2);
+            const canvasAspect = innerWidth / innerHeight;
+            const imageAspect = width / height;
+            let drawWidth = innerWidth;
+            let drawHeight = innerHeight;
+            if (imageAspect > canvasAspect) {
+                drawHeight = drawWidth / imageAspect;
+            } else {
+                drawWidth = drawHeight * imageAspect;
+            }
+            const dx = (canvas.width - drawWidth) / 2;
+            const dy = (canvas.height - drawHeight) / 2;
+            try {
+                ctx.drawImage(source, 0, 0, width, height, dx, dy, drawWidth, drawHeight);
+            } catch (error) {
+                // Ignore draw errors that can occur while a frame is not ready
+            }
+        }
+
+        if (gradient && gradient.from && gradient.to) {
+            const grd = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            grd.addColorStop(0, gradient.from);
+            grd.addColorStop(1, gradient.to);
+            ctx.fillStyle = grd;
+            const alpha = typeof gradient.alpha === 'number' ? gradient.alpha : 0.25;
+            if (alpha > 0) {
+                ctx.globalAlpha = alpha;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        if (stroke) {
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeRect(strokeWidth / 2, strokeWidth / 2, canvas.width - strokeWidth, canvas.height - strokeWidth);
+        }
+
+        ctx.restore();
+        return Boolean(dims);
+    }
+
+    // Generate a rim texture sized to the crown aspect ratio so imagery stays proportional.
+    createRimCanvasTexture(sourceTexture, buildingWidth = 1, rimHeight = 0.3) {
+        const image = this.getTextureImage(sourceTexture);
+        const dims = this.getSourceDimensions(image);
+        if (!dims) {
+            return null;
+        }
+
+        const canvasWidth = 512;
+        const safeWidth = Math.max(0.5, buildingWidth || 1);
+        const safeHeight = Math.max(0.1, rimHeight || 0.3);
+        const aspect = safeWidth / safeHeight;
+        const canvasHeight = Math.max(32, Math.min(256, Math.round(canvasWidth / aspect)));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        this.drawSourceToCanvas(image, canvas, ctx, {
+            background: 'rgba(0, 8, 20, 0.95)',
+            padding: 4,
+            stroke: 'rgba(0, 255, 255, 0.35)',
+            strokeWidth: 3,
+            gradient: {
+                from: 'rgba(0, 255, 255, 0.15)',
+                to: 'rgba(255, 0, 128, 0.2)',
+                alpha: 1
+            }
+        });
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.encoding = THREE.sRGBEncoding;
+        texture.wrapS = THREE.ClampToEdgeWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.needsUpdate = true;
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearMipMapLinearFilter;
+        if (this.renderer) {
+            texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+        }
+        return texture;
+    }
+
+    prepareVideoRimCanvas(buildingWidth = 1, rimHeight = 0.3, allowFrame = false) {
+        if (!this.videoRimCanvas || !this.videoRimCtx) {
+            return false;
+        }
+
+        const canvasWidth = this.videoRimCanvas.width || 512;
+        const safeWidth = Math.max(0.5, buildingWidth || 1);
+        const safeHeight = Math.max(0.1, rimHeight || 0.3);
+        const aspect = safeWidth / safeHeight;
+        const targetHeight = Math.max(32, Math.min(256, Math.round(canvasWidth / aspect)));
+        if (this.videoRimCanvas.height !== targetHeight) {
+            this.videoRimCanvas.height = targetHeight;
+        }
+
+        const canDraw = allowFrame && this.videoElement && this.videoElement.videoWidth && this.videoElement.videoHeight;
+        const source = canDraw ? this.videoElement : null;
+
+        this.drawSourceToCanvas(source, this.videoRimCanvas, this.videoRimCtx, {
+            background: 'rgba(0, 0, 0, 0.95)',
+            padding: 6,
+            stroke: 'rgba(255, 0, 128, 0.45)',
+            strokeWidth: 3,
+            gradient: {
+                from: 'rgba(0, 255, 255, 0.1)',
+                to: 'rgba(255, 0, 128, 0.18)',
+                alpha: 0.9
+            }
+        });
+
+        this.videoRimTexture.needsUpdate = true;
+        return Boolean(source);
+    }
+
+    updateVideoCanvases(force = false) {
+        if (!this.videoElement || !this.videoCanvas || !this.videoCanvasCtx) {
+            return;
+        }
+
+        const hasFrame = this.videoElement.readyState >= this.videoElement.HAVE_CURRENT_DATA && this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0;
+        if (!hasFrame && !force) {
+            return;
+        }
+
+        const source = hasFrame ? this.videoElement : null;
+        this.drawSourceToCanvas(source, this.videoCanvas, this.videoCanvasCtx, {
+            background: 'rgba(0, 0, 0, 0.92)',
+            padding: 12,
+            stroke: 'rgba(0, 255, 255, 0.4)',
+            strokeWidth: 4,
+            gradient: {
+                from: 'rgba(0, 255, 255, 0.18)',
+                to: 'rgba(255, 0, 128, 0.15)',
+                alpha: 0.9
+            }
+        });
+        this.videoCanvasTexture.needsUpdate = true;
+
+        if (this.mediaBuilding && this.mediaBuilding.userData) {
+            const { width, rimHeight } = this.mediaBuilding.userData;
+            this.prepareVideoRimCanvas(width, rimHeight, hasFrame || force);
+        }
     }
 
     createHexTexture(lines) {
@@ -988,20 +1187,26 @@ class FileCity {
                 this.videoElement.removeAttribute('src');
                 this.videoElement.load();
                 this.videoElement.currentTime = 0;
-                if (this.videoTexture) {
-                    this.videoTexture.needsUpdate = false;
+                if (this.videoCanvasTexture) {
+                    this.videoCanvasTexture.needsUpdate = false;
                 }
-                if (this.videoTextureSide) {
-                    this.videoTextureSide.needsUpdate = false;
+                if (this.videoCanvas && this.videoCanvasCtx) {
+                    this.videoCanvasCtx.clearRect(0, 0, this.videoCanvas.width, this.videoCanvas.height);
+                }
+                if (this.videoRimTexture) {
+                    this.videoRimTexture.needsUpdate = false;
+                }
+                if (this.videoRimCanvas && this.videoRimCtx) {
+                    this.videoRimCtx.clearRect(0, 0, this.videoRimCanvas.width, this.videoRimCanvas.height);
                 }
                 if (this.mediaBuilding.userData) {
                     const { topMaterial, rimMaterial, previousMap, previousRimMap, previousState } = this.mediaBuilding.userData;
                     if (topMaterial) {
-                        topMaterial.map = previousMap || topMaterial.map;
+                        topMaterial.map = previousMap || null;
                         topMaterial.needsUpdate = true;
                     }
                     if (rimMaterial) {
-                        rimMaterial.map = previousRimMap || rimMaterial.map;
+                        rimMaterial.map = previousRimMap || null;
                         rimMaterial.opacity = previousRimMap ? 1 : rimMaterial.opacity;
                         rimMaterial.needsUpdate = true;
                     }
@@ -1009,6 +1214,7 @@ class FileCity {
                     this.mediaBuilding.userData.previousMap = null;
                     this.mediaBuilding.userData.previousRimMap = null;
                     this.mediaBuilding.userData.previousState = null;
+                    this.mediaBuilding.userData.rimGeneratedTexture = null;
                 }
             }
 
@@ -1034,7 +1240,7 @@ class FileCity {
             const src = `/api/file-preview?path=${encodeURIComponent(file.path)}&t=${Date.now()}`;
             this.stopMedia();
 
-            if (!this.videoElement || !this.videoTexture || !this.videoTextureSide) return;
+        if (!this.videoElement || !this.videoCanvasTexture || !this.videoRimTexture) return;
 
             if (this.pendingVideoHandlers) {
                 const { loaded, error } = this.pendingVideoHandlers;
@@ -1053,12 +1259,13 @@ class FileCity {
                 if (this.activeMedia !== 'video' || this.mediaBuilding !== building) {
                     return;
                 }
-                topMaterial.map = this.videoTexture;
+                this.updateVideoCanvases(true);
+                topMaterial.map = this.videoCanvasTexture;
                 topMaterial.opacity = 1;
                 topMaterial.needsUpdate = true;
-                this.setRimTexture(building, this.videoTextureSide, { clone: false, preserveCurrent: true });
-                this.videoTexture.needsUpdate = true;
-                this.videoTextureSide.needsUpdate = true;
+                this.setRimTexture(building, this.videoCanvasTexture, { clone: false, preserveCurrent: true, video: true });
+                this.videoCanvasTexture.needsUpdate = true;
+                this.videoRimTexture.needsUpdate = true;
                 building.userData.textureState = 'video';
             };
 
@@ -1066,6 +1273,7 @@ class FileCity {
                 this.videoElement.removeEventListener('loadeddata', handleLoaded);
                 this.videoElement.removeEventListener('error', handleError);
                 this.pendingVideoHandlers = null;
+                this.updateVideoCanvases(true);
                 applyVideoTexture();
             };
 
@@ -1138,19 +1346,8 @@ class FileCity {
         this.updateParticles();
         this.updateBuildingTextures();
 
-        if (this.activeMedia === 'video' && this.videoTexture && this.mediaBuilding && this.mediaBuilding.userData.textureState === 'video') {
-            const hasFrame = this.videoElement && this.videoElement.readyState >= this.videoElement.HAVE_CURRENT_DATA && this.videoElement.videoWidth > 0;
-            this.videoTexture.needsUpdate = hasFrame;
-            if (this.videoTextureSide) {
-                this.videoTextureSide.needsUpdate = hasFrame;
-            }
-        } else {
-            if (this.videoTexture) {
-                this.videoTexture.needsUpdate = false;
-            }
-            if (this.videoTextureSide) {
-                this.videoTextureSide.needsUpdate = false;
-            }
+        if (this.activeMedia === 'video' && this.mediaBuilding && this.mediaBuilding.userData.textureState === 'video') {
+            this.updateVideoCanvases();
         }
 
         this.renderer.render(this.scene, this.camera);
