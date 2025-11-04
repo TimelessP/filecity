@@ -50,8 +50,10 @@ class FileCity {
     this.audioElement = null;
     this.videoElement = null;
     this.videoTexture = null;
+    this.videoTextureSide = null;
     this.mediaBuilding = null;
     this.directoryToken = 0;
+    this.pendingVideoHandlers = null;
         
         // Colors and materials
         this.colors = {
@@ -222,6 +224,17 @@ class FileCity {
         this.videoTexture.minFilter = THREE.LinearFilter;
         this.videoTexture.magFilter = THREE.LinearFilter;
         this.videoTexture.generateMipmaps = false;
+    this.videoTexture.wrapS = THREE.ClampToEdgeWrapping;
+    this.videoTexture.wrapT = THREE.ClampToEdgeWrapping;
+
+    this.videoTextureSide = new THREE.VideoTexture(this.videoElement);
+    this.videoTextureSide.encoding = THREE.sRGBEncoding;
+    this.videoTextureSide.needsUpdate = false;
+    this.videoTextureSide.minFilter = THREE.LinearFilter;
+    this.videoTextureSide.magFilter = THREE.LinearFilter;
+    this.videoTextureSide.generateMipmaps = false;
+    this.videoTextureSide.wrapS = THREE.ClampToEdgeWrapping;
+    this.videoTextureSide.wrapT = THREE.ClampToEdgeWrapping;
     }
     
     requestPointerLock() {
@@ -344,7 +357,7 @@ class FileCity {
                 if (child.material) {
                     const materials = Array.isArray(child.material) ? child.material : [child.material];
                     materials.forEach(material => {
-                        if (material.map && material.map !== this.ghostTexture && material.map !== this.directoryTexture && material.map !== this.videoTexture) {
+                        if (material.map && material.map !== this.ghostTexture && material.map !== this.directoryTexture && material.map !== this.videoTexture && material.map !== this.videoTextureSide) {
                             material.map.dispose();
                         }
                         material.map = null;
@@ -482,6 +495,7 @@ class FileCity {
             rimMaterial,
             height,
             width,
+            rimHeight,
             textureState: file.is_directory ? 'directory' : 'ghost',
             edges: edgeLines,
             edgeMaterial,
@@ -511,44 +525,91 @@ class FileCity {
     
     applyHexTexture(building, texture) {
         if (!texture) return;
-        const { topMaterial, rimMaterial } = building.userData;
+        const { topMaterial } = building.userData;
         topMaterial.map = texture;
         topMaterial.opacity = 1;
         topMaterial.needsUpdate = true;
-        if (rimMaterial) {
-            rimMaterial.map = texture;
-            rimMaterial.opacity = 1;
-            rimMaterial.needsUpdate = true;
-        }
+        this.setRimTexture(building, texture);
         building.userData.textureState = 'loaded';
     }
 
     applyGhostTexture(building) {
         if (!this.ghostTexture) return;
-        const { topMaterial, rimMaterial } = building.userData;
+        const { topMaterial } = building.userData;
         topMaterial.map = this.ghostTexture;
         topMaterial.opacity = 1;
         topMaterial.needsUpdate = true;
-        if (rimMaterial) {
-            rimMaterial.map = this.ghostTexture;
-            rimMaterial.opacity = 1;
-            rimMaterial.needsUpdate = true;
-        }
+        this.setRimTexture(building, this.ghostTexture);
         building.userData.textureState = 'ghost';
     }
 
     applyDirectoryTexture(building) {
         if (!this.directoryTexture) return;
-        const { topMaterial, rimMaterial } = building.userData;
+        const { topMaterial } = building.userData;
         topMaterial.map = this.directoryTexture;
         topMaterial.opacity = 1;
         topMaterial.needsUpdate = true;
-        if (rimMaterial) {
-            rimMaterial.map = this.directoryTexture;
-            rimMaterial.opacity = 1;
-            rimMaterial.needsUpdate = true;
-        }
+        this.setRimTexture(building, this.directoryTexture);
         building.userData.textureState = 'directory';
+    }
+
+    setRimTexture(building, sourceTexture, options = {}) {
+        const { rimMaterial, rimHeight, width, previousRimMap } = building.userData;
+        if (!rimMaterial) {
+            return;
+        }
+
+        const { clone = true, preserveCurrent = false } = options;
+        const currentMap = rimMaterial.map;
+        if (!preserveCurrent && currentMap && currentMap !== this.videoTextureSide && currentMap !== previousRimMap && typeof currentMap.dispose === 'function') {
+            currentMap.dispose();
+        }
+
+        if (!sourceTexture) {
+            rimMaterial.map = null;
+            rimMaterial.needsUpdate = true;
+            return;
+        }
+
+        let rimTexture = sourceTexture;
+        if (clone) {
+            rimTexture = sourceTexture.clone();
+            rimTexture.image = sourceTexture.image;
+            rimTexture.needsUpdate = true;
+            rimTexture.encoding = sourceTexture.encoding;
+            rimTexture.anisotropy = sourceTexture.anisotropy;
+            rimTexture.magFilter = sourceTexture.magFilter;
+            rimTexture.minFilter = sourceTexture.minFilter;
+            rimTexture.generateMipmaps = sourceTexture.generateMipmaps;
+            rimTexture.flipY = sourceTexture.flipY;
+        }
+
+        const widthValue = width || 1;
+        const heightValue = rimHeight || 1;
+        let repeatX = 1;
+        let repeatY = 1;
+        if (widthValue >= heightValue) {
+            const scale = Math.max(0.0001, heightValue / widthValue);
+            repeatX = scale;
+        } else {
+            const scale = Math.max(0.0001, widthValue / heightValue);
+            repeatY = scale;
+        }
+
+        rimTexture.wrapS = THREE.ClampToEdgeWrapping;
+        rimTexture.wrapT = THREE.ClampToEdgeWrapping;
+        rimTexture.center.set(0.5, 0.5);
+        rimTexture.repeat.set(repeatX, repeatY);
+        rimTexture.offset.set((1 - repeatX) / 2, (1 - repeatY) / 2);
+
+        if (this.renderer) {
+            rimTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+        }
+
+        rimTexture.needsUpdate = true;
+        rimMaterial.map = rimTexture;
+        rimMaterial.opacity = 1;
+        rimMaterial.needsUpdate = true;
     }
 
     createHexTexture(lines) {
@@ -895,15 +956,11 @@ class FileCity {
                 this.ensureBuildingGhost(building);
                 return;
             }
-            const { topMaterial, rimMaterial } = building.userData;
+            const { topMaterial } = building.userData;
             topMaterial.map = texture;
             topMaterial.opacity = 1;
             topMaterial.needsUpdate = true;
-            if (rimMaterial) {
-                rimMaterial.map = texture;
-                rimMaterial.opacity = 1;
-                rimMaterial.needsUpdate = true;
-            }
+            this.setRimTexture(building, texture);
             building.userData.textureState = 'image';
         }
 
@@ -921,12 +978,21 @@ class FileCity {
             }
 
             if (this.activeMedia === 'video' && this.videoElement && this.mediaBuilding) {
+                if (this.pendingVideoHandlers) {
+                    const { loaded, error } = this.pendingVideoHandlers;
+                    this.videoElement.removeEventListener('loadeddata', loaded);
+                    this.videoElement.removeEventListener('error', error);
+                    this.pendingVideoHandlers = null;
+                }
                 this.videoElement.pause();
                 this.videoElement.removeAttribute('src');
                 this.videoElement.load();
                 this.videoElement.currentTime = 0;
                 if (this.videoTexture) {
                     this.videoTexture.needsUpdate = false;
+                }
+                if (this.videoTextureSide) {
+                    this.videoTextureSide.needsUpdate = false;
                 }
                 if (this.mediaBuilding.userData) {
                     const { topMaterial, rimMaterial, previousMap, previousRimMap, previousState } = this.mediaBuilding.userData;
@@ -936,6 +1002,7 @@ class FileCity {
                     }
                     if (rimMaterial) {
                         rimMaterial.map = previousRimMap || rimMaterial.map;
+                        rimMaterial.opacity = previousRimMap ? 1 : rimMaterial.opacity;
                         rimMaterial.needsUpdate = true;
                     }
                     this.mediaBuilding.userData.textureState = previousState || 'ghost';
@@ -947,6 +1014,7 @@ class FileCity {
 
             this.activeMedia = null;
             this.mediaBuilding = null;
+            this.pendingVideoHandlers = null;
         }
 
         playAudio(building) {
@@ -966,30 +1034,54 @@ class FileCity {
             const src = `/api/file-preview?path=${encodeURIComponent(file.path)}&t=${Date.now()}`;
             this.stopMedia();
 
-            if (!this.videoElement || !this.videoTexture) return;
+            if (!this.videoElement || !this.videoTexture || !this.videoTextureSide) return;
+
+            if (this.pendingVideoHandlers) {
+                const { loaded, error } = this.pendingVideoHandlers;
+                this.videoElement.removeEventListener('loadeddata', loaded);
+                this.videoElement.removeEventListener('error', error);
+                this.pendingVideoHandlers = null;
+            }
 
             const { topMaterial, rimMaterial } = building.userData;
             building.userData.previousMap = topMaterial.map;
             building.userData.previousRimMap = rimMaterial ? rimMaterial.map : null;
             building.userData.previousState = building.userData.textureState;
+            building.userData.textureState = 'video-pending';
 
-            topMaterial.map = this.videoTexture;
-            topMaterial.opacity = 1;
-            topMaterial.needsUpdate = true;
-            if (rimMaterial) {
-                rimMaterial.map = this.videoTexture;
-                rimMaterial.opacity = 1;
-                rimMaterial.needsUpdate = true;
-            }
-            building.userData.textureState = 'video';
+            const applyVideoTexture = () => {
+                if (this.activeMedia !== 'video' || this.mediaBuilding !== building) {
+                    return;
+                }
+                topMaterial.map = this.videoTexture;
+                topMaterial.opacity = 1;
+                topMaterial.needsUpdate = true;
+                this.setRimTexture(building, this.videoTextureSide, { clone: false, preserveCurrent: true });
+                this.videoTexture.needsUpdate = true;
+                this.videoTextureSide.needsUpdate = true;
+                building.userData.textureState = 'video';
+            };
+
+            const handleLoaded = () => {
+                this.videoElement.removeEventListener('loadeddata', handleLoaded);
+                this.videoElement.removeEventListener('error', handleError);
+                this.pendingVideoHandlers = null;
+                applyVideoTexture();
+            };
+
+            const handleError = () => {
+                this.videoElement.removeEventListener('loadeddata', handleLoaded);
+                this.videoElement.removeEventListener('error', handleError);
+                this.pendingVideoHandlers = null;
+                this.stopMedia();
+            };
+
+            this.videoElement.addEventListener('loadeddata', handleLoaded);
+            this.videoElement.addEventListener('error', handleError);
+            this.pendingVideoHandlers = { loaded: handleLoaded, error: handleError };
 
             this.videoElement.src = src;
             this.videoElement.currentTime = 0;
-            this.videoElement.addEventListener('loadeddata', () => {
-                if (this.activeMedia === 'video' && this.mediaBuilding === building) {
-                    this.videoTexture.needsUpdate = true;
-                }
-            }, { once: true });
             this.videoElement.play().catch(() => {});
 
             this.activeMedia = 'video';
@@ -1046,11 +1138,18 @@ class FileCity {
         this.updateParticles();
         this.updateBuildingTextures();
 
-        if (this.activeMedia === 'video' && this.videoTexture) {
-            if (this.videoElement && this.videoElement.readyState >= this.videoElement.HAVE_CURRENT_DATA && this.videoElement.videoWidth > 0) {
-                this.videoTexture.needsUpdate = true;
-            } else {
+        if (this.activeMedia === 'video' && this.videoTexture && this.mediaBuilding && this.mediaBuilding.userData.textureState === 'video') {
+            const hasFrame = this.videoElement && this.videoElement.readyState >= this.videoElement.HAVE_CURRENT_DATA && this.videoElement.videoWidth > 0;
+            this.videoTexture.needsUpdate = hasFrame;
+            if (this.videoTextureSide) {
+                this.videoTextureSide.needsUpdate = hasFrame;
+            }
+        } else {
+            if (this.videoTexture) {
                 this.videoTexture.needsUpdate = false;
+            }
+            if (this.videoTextureSide) {
+                this.videoTextureSide.needsUpdate = false;
             }
         }
 
