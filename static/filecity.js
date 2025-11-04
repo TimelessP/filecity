@@ -367,7 +367,11 @@ class FileCity {
             this.currentPath = data.path;
             this.allFiles = data.items;
 
-            this.previewCache.forEach((texture) => texture.dispose?.());
+            this.previewCache.forEach((texture) => {
+                if (texture && typeof texture.dispose === 'function') {
+                    texture.dispose();
+                }
+            });
             this.previewCache.clear();
             this.pendingPreviewLoads.clear();
 
@@ -659,10 +663,12 @@ class FileCity {
                         return;
                     }
                     const texture = this.createImagePreviewTexture(bitmap);
-                    this.previewCache.set(key, texture);
-                    building.userData.previewAssets[mode] = texture;
-                    if (building.userData.previewMode === mode && building.userData.inFocus) {
-                        this.updatePreviewCube(building, texture);
+                    if (texture) {
+                        this.previewCache.set(key, texture);
+                        building.userData.previewAssets[mode] = texture;
+                        if (building.userData.previewMode === mode && building.userData.inFocus) {
+                            this.updatePreviewCube(building, texture);
+                        }
                     }
                 })
                 .catch(() => {
@@ -684,10 +690,12 @@ class FileCity {
                     return;
                 }
                 const texture = this.createHexPreviewTexture(data.lines);
-                this.previewCache.set(key, texture);
-                building.userData.previewAssets[mode] = texture;
-                if (building.userData.previewMode === mode && building.userData.inFocus) {
-                    this.updatePreviewCube(building, texture);
+                if (texture) {
+                    this.previewCache.set(key, texture);
+                    building.userData.previewAssets[mode] = texture;
+                    if (building.userData.previewMode === mode && building.userData.inFocus) {
+                        this.updatePreviewCube(building, texture);
+                    }
                 }
             })
             .catch(() => {
@@ -709,40 +717,70 @@ class FileCity {
     }
 
     createHexPreviewTexture(lines) {
-        const dimension = 512;
+        if (!lines || !lines.length) {
+            return null;
+        }
+
+        const fontSpec = '14px "Courier New", monospace';
+        const lineHeight = 22;
+        const topPadding = 24;
+        const bottomPadding = 24;
+        const leftPadding = 20;
+        const rightPadding = 24;
+        const maxLines = Math.min(lines.length, 18);
+
+        const offsetWidth = 10; // length of "00000000:" plus trailing space padding
+        const hexColumnWidth = 47; // mirrors backend spacing for hex dump
+        const formatted = [];
+
+        lines.slice(0, maxLines).forEach((line) => {
+            const offsetText = `${line.offset}:`.padEnd(offsetWidth, ' ');
+            const hexText = (line.hex || '').trimEnd().padEnd(hexColumnWidth, ' ');
+            const asciiText = line.ascii || '';
+            formatted.push(`${offsetText}${hexText} ${asciiText}`);
+        });
+
+        if (!formatted.length) {
+            return null;
+        }
+
+        const measureCanvas = document.createElement('canvas');
+        const measureCtx = measureCanvas.getContext('2d');
+        if (!measureCtx) {
+            return null;
+        }
+        measureCtx.font = fontSpec;
+        let maxTextWidth = 0;
+        formatted.forEach((text) => {
+            const metrics = measureCtx.measureText(text);
+            maxTextWidth = Math.max(maxTextWidth, metrics.width);
+        });
+
+        const canvasWidth = Math.max(256, Math.ceil(leftPadding + maxTextWidth + rightPadding));
+        const canvasHeight = Math.max(160, Math.ceil(topPadding + bottomPadding + formatted.length * lineHeight));
+
         const canvas = document.createElement('canvas');
-        canvas.width = dimension;
-        canvas.height = dimension;
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
             return null;
         }
 
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-        ctx.fillRect(0, 0, dimension, dimension);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.3)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, canvasWidth - 2, canvasHeight - 2);
 
-        ctx.font = '14px "Courier New", monospace';
+        ctx.font = fontSpec;
         ctx.textBaseline = 'top';
         ctx.textAlign = 'left';
         ctx.fillStyle = '#00f5ff';
 
-        const topPadding = 24;
-        const bottomPadding = 24;
-        const lineHeight = 22;
-        const usableHeight = dimension - topPadding - bottomPadding;
-        const maxLines = Math.max(1, Math.floor(usableHeight / lineHeight));
-
-        const offsetColumnX = 20;
-        const hexColumnX = 110;
-        const asciiBaseX = dimension - 140;
-
-        lines.slice(0, maxLines).forEach((line, index) => {
+        formatted.forEach((text, index) => {
             const y = topPadding + index * lineHeight;
-            ctx.fillText(`${line.offset}:`, offsetColumnX, y);
-            ctx.fillText(line.hex, hexColumnX, y);
-            const hexWidth = ctx.measureText(line.hex).width;
-            const asciiX = Math.min(asciiBaseX, hexColumnX + hexWidth + 24);
-            ctx.fillText(line.ascii, asciiX, y);
+            ctx.fillText(text, leftPadding, y);
         });
 
         return this.canvasToTexture(canvas);
