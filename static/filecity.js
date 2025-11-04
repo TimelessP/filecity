@@ -38,6 +38,12 @@ class FileCity {
         this.lastPreviewUpdate = 0;
         this.directoryPreviewTexture = null;
 
+        // View state stack
+        this.viewStack = [];
+        this.pendingViewState = null;
+        this.defaultViewState = null;
+        this.pendingStackPushPath = null;
+
         // Media playback
         this.activeMedia = null; // 'audio' | 'video'
         this.audioElement = null;
@@ -101,6 +107,7 @@ class FileCity {
 
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         this.camera.position.set(0, 10, 20);
+        this.defaultViewState = this.getCurrentViewState();
 
         this.renderer = new THREE.WebGLRenderer({ antialias: true });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -203,6 +210,9 @@ class FileCity {
             }
             const fileInfo = building.userData.fileInfo;
             if (fileInfo.is_directory) {
+                this.pushCurrentViewState();
+                this.pendingStackPushPath = fileInfo.path;
+                this.setPendingViewState(this.getDefaultViewState());
                 this.loadDirectory(fileInfo.path);
             } else {
                 this.handleFileInteraction(building);
@@ -308,10 +318,11 @@ class FileCity {
     }
 
     async loadDirectory(path = null) {
+        const targetPath = path ?? null;
         try {
             this.stopMedia();
 
-            const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+            const url = targetPath ? `/api/browse?path=${encodeURIComponent(targetPath)}` : '/api/browse';
             const response = await fetch(url);
             const data = await response.json();
 
@@ -327,8 +338,15 @@ class FileCity {
 
             await this.loadFavourites();
             this.applyFileFilter();
+            this.applyPendingViewState();
+            this.pendingStackPushPath = null;
         } catch (error) {
             console.error('Failed to load directory:', error);
+            if (this.pendingStackPushPath && targetPath === this.pendingStackPushPath && this.viewStack.length) {
+                this.viewStack.pop();
+            }
+            this.pendingStackPushPath = null;
+            this.pendingViewState = null;
         }
     }
 
@@ -912,16 +930,89 @@ class FileCity {
 
         this.camera.position.copy(targetPosition);
 
-    const upVector = this.camera.up.clone();
-    const lookMatrix = new THREE.Matrix4().lookAt(targetPosition, cubeWorldPos, upVector);
-    const lookEuler = new THREE.Euler().setFromRotationMatrix(lookMatrix, 'YXZ');
+        const upVector = this.camera.up.clone();
+        const lookMatrix = new THREE.Matrix4().lookAt(targetPosition, cubeWorldPos, upVector);
+        const lookEuler = new THREE.Euler().setFromRotationMatrix(lookMatrix, 'YXZ');
 
-    this.pitch = THREE.MathUtils.clamp(lookEuler.x, -Math.PI / 2, Math.PI / 2);
-    this.yaw = lookEuler.y;
-    this.roll = 0;
+        this.pitch = THREE.MathUtils.clamp(lookEuler.x, -Math.PI / 2, Math.PI / 2);
+        this.yaw = lookEuler.y;
+        this.roll = 0;
 
-    const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
-    this.camera.quaternion.setFromEuler(baseEuler);
+        const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
+        this.camera.quaternion.setFromEuler(baseEuler);
+    }
+
+    getCurrentViewState() {
+        if (!this.camera) {
+            return this.getDefaultViewState();
+        }
+        return {
+            position: this.camera.position.clone(),
+            pitch: this.pitch,
+            yaw: this.yaw,
+            roll: this.roll
+        };
+    }
+
+    cloneViewState(state) {
+        if (!state) {
+            return null;
+        }
+        return {
+            position: state.position ? state.position.clone() : new THREE.Vector3(0, 10, 20),
+            pitch: state.pitch ?? 0,
+            yaw: state.yaw ?? 0,
+            roll: state.roll ?? 0
+        };
+    }
+
+    getDefaultViewState() {
+        if (this.defaultViewState) {
+            return this.cloneViewState(this.defaultViewState);
+        }
+        return {
+            position: new THREE.Vector3(0, 10, 20),
+            pitch: 0,
+            yaw: 0,
+            roll: 0
+        };
+    }
+
+    pushCurrentViewState() {
+        this.viewStack.push(this.getCurrentViewState());
+    }
+
+    setPendingViewState(state) {
+        this.pendingViewState = state ? this.cloneViewState(state) : null;
+    }
+
+    applyViewState(state) {
+        if (!state || !this.camera) {
+            return;
+        }
+
+        this.camera.position.copy(state.position);
+        this.pitch = state.pitch ?? 0;
+        this.yaw = state.yaw ?? 0;
+        this.roll = state.roll ?? 0;
+        this.camera_velocity.set(0, 0, 0);
+
+        const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
+        this.camera.quaternion.setFromEuler(baseEuler);
+
+        if (Math.abs(this.roll) > 1e-6) {
+            const rollQuaternion = new THREE.Quaternion();
+            rollQuaternion.setFromAxisAngle(new THREE.Vector3(0, 0, -1), this.roll);
+            this.camera.quaternion.multiply(rollQuaternion);
+        }
+    }
+
+    applyPendingViewState() {
+        if (!this.pendingViewState) {
+            return;
+        }
+        this.applyViewState(this.pendingViewState);
+        this.pendingViewState = null;
     }
 
     drawSourceToCanvas(source, canvas, ctx, options = {}) {
@@ -1288,8 +1379,12 @@ class FileCity {
 
     reloadCurrentDirectory() {
         if (this.currentPath) {
+            this.setPendingViewState(this.getCurrentViewState());
+            this.pendingStackPushPath = null;
             this.loadDirectory(this.currentPath);
         } else {
+            this.setPendingViewState(this.getCurrentViewState());
+            this.pendingStackPushPath = null;
             this.loadDirectory();
         }
     }
@@ -1302,19 +1397,34 @@ class FileCity {
     }
 
     goToParentDirectory() {
-        if (this.currentPath) {
-            const parts = this.currentPath.split(/[\\/]/).filter(Boolean);
-            if (parts.length === 0) {
-                this.loadDirectory();
-            } else {
-                parts.pop();
-                const parentPath = parts.length ? `/${parts.join('/')}` : null;
-                this.loadDirectory(parentPath);
-            }
+        if (!this.currentPath) {
+            this.setPendingViewState(this.getDefaultViewState());
+            this.pendingStackPushPath = null;
+            this.loadDirectory();
+            return;
         }
+
+        const parts = this.currentPath.split(/[\\/]/).filter(Boolean);
+        if (parts.length === 0) {
+            this.viewStack = [];
+            this.setPendingViewState(this.getDefaultViewState());
+            this.pendingStackPushPath = null;
+            this.loadDirectory();
+            return;
+        }
+
+        parts.pop();
+        const parentPath = parts.length ? `/${parts.join('/')}` : null;
+        const viewState = this.viewStack.length ? this.viewStack.pop() : null;
+        this.setPendingViewState(viewState ?? this.getDefaultViewState());
+        this.pendingStackPushPath = null;
+        this.loadDirectory(parentPath);
     }
 
     goToHome() {
+        this.viewStack = [];
+        this.setPendingViewState(this.getDefaultViewState());
+        this.pendingStackPushPath = null;
         this.loadDirectory();
     }
 
