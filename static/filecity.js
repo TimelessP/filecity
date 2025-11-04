@@ -531,15 +531,16 @@ class FileCity {
             this.removePreviewCube(building);
             building.traverse(child => {
                 if (child.isMesh || child.isLine || child.isSprite) {
-                    const retainShared = !!(child.userData && child.userData.retainShared);
-                    if (child.geometry) {
-                        if (!retainShared) {
-                            child.geometry.dispose();
-                        }
+                    const userData = child.userData || {};
+                    const retainShared = !!userData.retainShared;
+                    const retainGeometry = userData.retainSharedGeometry ?? retainShared;
+                    const retainMaterial = userData.retainSharedMaterial ?? retainShared;
+                    if (child.geometry && !retainGeometry) {
+                        child.geometry.dispose();
                     }
                     const disposeMaterial = (material) => {
                         if (!material) return;
-                        if (retainShared) {
+                        if (retainMaterial) {
                             return;
                         }
                         if (material.map && !this.previewCache.has(material.map)) {
@@ -610,13 +611,16 @@ class FileCity {
         group.position.set(x, 0, z);
 
         this.ensurePavementAssets();
+        let pavement = null;
         if (this.pavementGeometry && this.pavementMaterial) {
-            const pavement = new THREE.Mesh(this.pavementGeometry, this.pavementMaterial);
+            const pavementMaterial = this.pavementMaterial.clone();
+            pavement = new THREE.Mesh(this.pavementGeometry, pavementMaterial);
             pavement.rotation.x = -Math.PI / 2;
             pavement.position.y = 0.01;
             pavement.renderOrder = -10;
             pavement.userData = pavement.userData || {};
-            pavement.userData.retainShared = true;
+            pavement.userData.retainSharedGeometry = true;
+            pavement.userData.retainSharedMaterial = false;
             group.add(pavement);
         }
 
@@ -656,7 +660,12 @@ class FileCity {
             currentMedia: null,
             directoryToken: this.directoryToken,
             labels: [],
-            inFocus: false
+            inFocus: false,
+            pavement,
+            pavementBaseColor: pavement && pavement.material ? pavement.material.color.clone() : null,
+            mediaActive: false,
+            pavementHighlightColor: null,
+            pavementHighlightHSL: null
         };
 
         if (file.is_favourite) {
@@ -706,6 +715,40 @@ class FileCity {
             } else if (data.currentMedia !== 'video') {
                 this.removePreviewCube(building);
             }
+        });
+    }
+
+    updateMediaHighlights() {
+        if (!this.buildings.length) {
+            return;
+        }
+
+        const time = performance.now() * 0.006;
+        const pulse = (Math.sin(time) + 1) / 2;
+
+        this.buildings.forEach((building) => {
+            const data = building.userData;
+            if (!data || !data.mediaActive) {
+                return;
+            }
+            const pavement = data.pavement;
+            const material = pavement && pavement.material;
+            if (!material) {
+                return;
+            }
+
+            if (!data.pavementHighlightColor) {
+                data.pavementHighlightColor = new THREE.Color(this.colors.favourite);
+            }
+            if (!data.pavementHighlightHSL) {
+                const hsl = { h: 0, s: 0, l: 0 };
+                data.pavementHighlightColor.getHSL(hsl);
+                data.pavementHighlightHSL = hsl;
+            }
+
+            const highlightHSL = data.pavementHighlightHSL;
+            const lightness = Math.min(1, 0.55 + pulse * 0.45);
+            material.color.setHSL(highlightHSL.h, highlightHSL.s, lightness);
         });
     }
 
@@ -1347,6 +1390,7 @@ class FileCity {
         this.audioElement.play().catch(() => {});
         this.activeMedia = 'audio';
         this.mediaBuilding = building;
+        this.setBuildingMediaState(building, true);
     }
 
     playVideo(building) {
@@ -1366,6 +1410,7 @@ class FileCity {
             building.userData.previewMode = 'video';
             this.mediaBuilding = building;
             this.activeMedia = 'video';
+            this.setBuildingMediaState(building, true);
             this.ensurePreviewForBuilding(building);
             this.updateVideoFrame(true);
         };
@@ -1383,6 +1428,7 @@ class FileCity {
             this.pendingVideoHandlers = null;
             building.userData.currentMedia = null;
             building.userData.previewMode = null;
+            this.setBuildingMediaState(building, false);
             this.ensurePreviewForBuilding(building);
         };
 
@@ -1417,6 +1463,7 @@ class FileCity {
     }
 
     stopMedia() {
+        const activeBuilding = this.mediaBuilding;
         if (this.activeMedia === 'audio' && this.audioElement) {
             this.audioElement.pause();
             this.audioElement.src = '';
@@ -1431,18 +1478,55 @@ class FileCity {
             this.videoElement.src = '';
         }
 
-        if (this.mediaBuilding && this.mediaBuilding.userData) {
-            this.mediaBuilding.userData.currentMedia = null;
-            this.mediaBuilding.userData.previewMode = null;
-            if (this.mediaBuilding.userData.inFocus) {
-                this.ensurePreviewForBuilding(this.mediaBuilding);
+        if (activeBuilding && activeBuilding.userData) {
+            activeBuilding.userData.currentMedia = null;
+            activeBuilding.userData.previewMode = null;
+            if (activeBuilding.userData.inFocus) {
+                this.ensurePreviewForBuilding(activeBuilding);
             } else {
-                this.removePreviewCube(this.mediaBuilding);
+                this.removePreviewCube(activeBuilding);
             }
+        }
+
+        if (activeBuilding) {
+            this.setBuildingMediaState(activeBuilding, false);
         }
 
         this.activeMedia = null;
         this.mediaBuilding = null;
+    }
+
+    setBuildingMediaState(building, isActive) {
+        if (!building || !building.userData) {
+            return;
+        }
+        const data = building.userData;
+        data.mediaActive = !!isActive;
+
+        const pavement = data.pavement;
+        if (!pavement || !pavement.material) {
+            return;
+        }
+
+        if (!data.pavementBaseColor) {
+            data.pavementBaseColor = pavement.material.color.clone();
+        }
+
+        if (!isActive) {
+            if (data.pavementBaseColor) {
+                pavement.material.color.copy(data.pavementBaseColor);
+            }
+            return;
+        }
+
+        if (!data.pavementHighlightColor) {
+            data.pavementHighlightColor = new THREE.Color(this.colors.favourite);
+        }
+        if (!data.pavementHighlightHSL) {
+            const hsl = { h: 0, s: 0, l: 0 };
+            data.pavementHighlightColor.getHSL(hsl);
+            data.pavementHighlightHSL = hsl;
+        }
     }
 
     skipActiveMedia(offsetSeconds) {
@@ -1559,6 +1643,7 @@ class FileCity {
         this.updateCamera();
         this.updateParticles();
         this.updateBuildingPreviews();
+        this.updateMediaHighlights();
         this.updateVideoFrame();
 
         this.renderer.render(this.scene, this.camera);
