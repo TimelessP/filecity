@@ -1467,20 +1467,24 @@ class FileCity {
 
         try {
             const response = await fetch('/api/favourites', {
-                method: shouldFavourite ? 'POST' : 'DELETE',
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path })
+                body: JSON.stringify({ path, favourite: shouldFavourite })
             });
             if (!response.ok) {
                 throw new Error('favourite toggle failed');
             }
-            if (shouldFavourite) {
+            const data = await response.json().catch(() => null);
+            if (Array.isArray(data)) {
+                this.favourites = new Set(data);
+            } else if (shouldFavourite) {
                 this.favourites.add(path);
             } else {
                 this.favourites.delete(path);
             }
-            building.userData.fileInfo.is_favourite = shouldFavourite;
-            this.applyFavouriteStyling(building, shouldFavourite);
+            const isFavourite = this.favourites.has(path);
+            building.userData.fileInfo.is_favourite = isFavourite;
+            this.applyFavouriteStyling(building, isFavourite);
         } catch (error) {
             console.warn('Failed to toggle favourite:', error);
         }
