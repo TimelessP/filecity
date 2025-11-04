@@ -180,6 +180,16 @@ class FileCity {
                 event.preventDefault();
                 this.cycleRenderDetail();
             }
+            if (event.code === 'BracketLeft') {
+                event.preventDefault();
+                const offset = event.shiftKey ? -60 : -10;
+                this.skipActiveMedia(offset);
+            }
+            if (event.code === 'BracketRight') {
+                event.preventDefault();
+                const offset = event.shiftKey ? 60 : 10;
+                this.skipActiveMedia(offset);
+            }
         });
 
         document.addEventListener('click', (event) => {
@@ -1433,6 +1443,35 @@ class FileCity {
 
         this.activeMedia = null;
         this.mediaBuilding = null;
+    }
+
+    skipActiveMedia(offsetSeconds) {
+        if (!this.activeMedia || !offsetSeconds) {
+            return;
+        }
+
+        const clampAndApply = (element) => {
+            if (!element || typeof element.currentTime !== 'number') {
+                return;
+            }
+            const duration = element.duration;
+            const hasDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0;
+            let target = element.currentTime + offsetSeconds;
+            if (target < 0) {
+                target = 0;
+            } else if (hasDuration && target > duration) {
+                target = duration;
+            }
+            element.currentTime = target;
+        };
+
+        if (this.activeMedia === 'audio') {
+            clampAndApply(this.audioElement);
+            return;
+        }
+        if (this.activeMedia === 'video') {
+            clampAndApply(this.videoElement);
+        }
     }
 
     getFileExtension(filename) {
