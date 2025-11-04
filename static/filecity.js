@@ -45,6 +45,9 @@ class FileCity {
 
     this.textureLoader = new THREE.TextureLoader();
 
+    // Geometry preferences
+    this.hexCubeSize = 2.4;
+
     // Media playback state
     this.activeMedia = null; // 'audio' | 'video'
     this.audioElement = null;
@@ -207,6 +210,57 @@ class FileCity {
                 this.handleClick();
             }
         });
+    }
+
+    setVideoRimShape(building, isActive) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const data = building.userData;
+        const { rimMesh, rimBaseHeight, rimBasePositionY, height, width } = data;
+        if (!rimMesh || !rimBaseHeight || !height || !width) {
+            return;
+        }
+
+        if (isActive) {
+            if (data.rimVideoActive) {
+                return;
+            }
+            const canFormCube = height >= width - 0.01;
+            if (!canFormCube) {
+                data.rimHeight = data.rimHeight || rimBaseHeight;
+                data.rimVideoActive = false;
+                return;
+            }
+
+            const targetHeight = width;
+            data.rimPreviousScaleY = rimMesh.scale.y;
+            data.rimPreviousPositionY = rimMesh.position.y;
+            data.rimPreviousHeight = data.rimHeight;
+            data.rimHeight = targetHeight;
+            rimMesh.scale.y = targetHeight / rimBaseHeight;
+            rimMesh.position.y = height - targetHeight / 2 - 0.02;
+            data.rimVideoActive = true;
+            if (data.rimMaterial) {
+                data.rimMaterial.needsUpdate = true;
+            }
+        } else {
+            if (!data.rimVideoActive) {
+                data.rimHeight = data.rimBaseHeight;
+                return;
+            }
+            rimMesh.scale.y = (data.rimPreviousScaleY != null) ? data.rimPreviousScaleY : 1;
+            rimMesh.position.y = (data.rimPreviousPositionY != null) ? data.rimPreviousPositionY : rimBasePositionY;
+            data.rimHeight = data.rimPreviousHeight != null ? data.rimPreviousHeight : data.rimBaseHeight;
+            data.rimPreviousScaleY = null;
+            data.rimPreviousPositionY = null;
+            data.rimPreviousHeight = null;
+            data.rimVideoActive = false;
+            if (data.rimMaterial) {
+                data.rimMaterial.needsUpdate = true;
+            }
+        }
     }
 
     initMedia() {
@@ -503,9 +557,15 @@ class FileCity {
             mesh,
             topMaterial,
             rimMaterial,
+            rimMesh: rim,
             height,
             width,
+            depth,
             rimHeight,
+            rimBaseHeight: rimHeight,
+            rimBasePositionY: rim.position.y,
+            baseRimHeight: rimHeight,
+            baseRimPositionY: rim.position.y,
             textureState: file.is_directory ? 'directory' : 'ghost',
             edges: edgeLines,
             edgeMaterial,
@@ -513,7 +573,12 @@ class FileCity {
             directoryToken: this.directoryToken,
             previousMap: null,
             previousRimMap: null,
-            previousState: null
+            previousState: null,
+            baseHeight: height,
+            baseWidth: width,
+            baseDepth: depth,
+            labels: [],
+            hexCubeActive: false,
         };
 
         if (file.is_directory) {
@@ -535,16 +600,20 @@ class FileCity {
     
     applyHexTexture(building, texture) {
         if (!texture) return;
+        this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
         topMaterial.map = texture;
         topMaterial.opacity = 1;
         topMaterial.needsUpdate = true;
         this.setRimTexture(building, texture);
+        this.ensureHexPreviewCube(building, texture);
         building.userData.textureState = 'loaded';
     }
 
     applyGhostTexture(building) {
         if (!this.ghostTexture) return;
+        this.removeHexPreviewCube(building);
+        this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
         topMaterial.map = this.ghostTexture;
         topMaterial.opacity = 1;
@@ -555,6 +624,8 @@ class FileCity {
 
     applyDirectoryTexture(building) {
         if (!this.directoryTexture) return;
+        this.removeHexPreviewCube(building);
+        this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
         topMaterial.map = this.directoryTexture;
         topMaterial.opacity = 1;
@@ -616,6 +687,163 @@ class FileCity {
         }
     }
 
+    ensureHexPreviewCube(building, texture) {
+        if (!building || !building.userData || !texture) {
+            return;
+        }
+
+        const data = building.userData;
+        if (data.fileInfo && data.fileInfo.is_directory) {
+            return;
+        }
+
+        const baseHeight = data.baseHeight || data.height || this.hexCubeSize;
+        const baseWidth = data.baseWidth || data.width || this.hexCubeSize;
+        const baseDepth = data.baseDepth || data.depth || baseWidth;
+        const cubeSize = Math.max(0.1, Math.min(this.hexCubeSize, baseHeight, baseWidth, baseDepth));
+        const offsetFromTop = cubeSize / 2 + 0.05;
+        const topY = (data.height || baseHeight) - offsetFromTop;
+
+        let cube = data.hexPreviewCube;
+        if (!cube) {
+            const cubeGeometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+            const cubeMaterial = new THREE.MeshBasicMaterial({
+                map: texture,
+                transparent: true,
+                opacity: 1,
+                depthWrite: false
+            });
+            texture.needsUpdate = true;
+            cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+            cube.position.y = topY;
+            building.add(cube);
+            data.hexPreviewCube = cube;
+        } else {
+            if (cube.geometry) {
+                cube.geometry.dispose();
+            }
+            cube.geometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+            cube.position.y = topY;
+            if (cube.material) {
+                cube.material.map = texture;
+                cube.material.needsUpdate = true;
+            }
+            texture.needsUpdate = true;
+        }
+
+        cube.position.x = 0;
+        cube.position.z = 0;
+
+        data.hexCubeActive = true;
+        data.hexCubeSize = cubeSize;
+    }
+
+    removeHexPreviewCube(building) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const data = building.userData;
+        const cube = data.hexPreviewCube;
+        if (!cube) {
+            data.hexCubeActive = false;
+            data.hexCubeSize = null;
+            return;
+        }
+
+        building.remove(cube);
+        if (cube.geometry) {
+            cube.geometry.dispose();
+        }
+        if (cube.material) {
+            cube.material.map = null;
+            cube.material.dispose();
+        }
+        data.hexPreviewCube = null;
+        data.hexCubeActive = false;
+        data.hexCubeSize = null;
+    }
+
+    restoreBaseGeometry(building) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const data = building.userData;
+        const width = data.baseWidth || data.width || this.hexCubeSize;
+        const depth = data.baseDepth || data.depth || width;
+        const height = data.baseHeight || data.height || width;
+
+        if (!data.mesh || width <= 0 || depth <= 0 || height <= 0) {
+            return;
+        }
+
+        const geometry = data.mesh.geometry;
+        const params = geometry && geometry.parameters;
+        const needsRestore = !params ||
+            Math.abs((params.width || 0) - width) > 1e-3 ||
+            Math.abs((params.height || 0) - height) > 1e-3 ||
+            Math.abs((params.depth || 0) - depth) > 1e-3;
+
+        if (!needsRestore) {
+            data.width = width;
+            data.height = height;
+            data.depth = depth;
+            return;
+        }
+
+        if (geometry) {
+            geometry.dispose();
+        }
+        data.mesh.geometry = new THREE.BoxGeometry(width, height, depth);
+        data.mesh.scale.set(1, 1, 1);
+        data.mesh.position.y = height / 2;
+
+        const rimMesh = data.rimMesh;
+        const baseRimHeight = data.baseRimHeight != null ? data.baseRimHeight : Math.min(0.6, Math.max(0.3, height * 0.15));
+        const baseRimPos = data.baseRimPositionY != null ? data.baseRimPositionY : height - baseRimHeight / 2 - 0.02;
+        data.rimHeight = baseRimHeight;
+        data.rimBaseHeight = baseRimHeight;
+        data.rimBasePositionY = baseRimPos;
+
+        if (rimMesh) {
+            if (rimMesh.geometry) {
+                rimMesh.geometry.dispose();
+            }
+            rimMesh.geometry = new THREE.BoxGeometry(width * 0.98, baseRimHeight, depth * 0.98);
+            rimMesh.scale.set(1, 1, 1);
+            rimMesh.position.y = baseRimPos;
+        }
+
+        const edges = data.edges;
+        if (edges) {
+            if (edges.geometry) {
+                edges.geometry.dispose();
+            }
+            edges.geometry = new THREE.EdgesGeometry(data.mesh.geometry);
+            edges.position.y = height / 2;
+        }
+
+        data.width = width;
+        data.height = height;
+        data.depth = depth;
+
+        if (Array.isArray(data.labels)) {
+            data.labels.forEach((sprite) => {
+                if (!sprite || !sprite.userData) {
+                    return;
+                }
+                const offset = sprite.userData.isFileLabel ? 0.8 : 1.2;
+                sprite.position.y = height + offset;
+            });
+        }
+
+        data.rimVideoActive = false;
+        data.rimPreviousScaleY = null;
+        data.rimPreviousPositionY = null;
+        data.rimPreviousHeight = null;
+    }
+
     getTextureImage(texture) {
         if (!texture) {
             return null;
@@ -643,7 +871,7 @@ class FileCity {
 
     // Letterbox arbitrary media into the target canvas to avoid stretching.
     drawSourceToCanvas(source, canvas, ctx, options = {}) {
-        const { background = 'rgba(0, 0, 0, 1)', padding = 0, stroke = null, strokeWidth = 2, gradient = null } = options;
+        const { background = 'rgba(0, 0, 0, 1)', padding = 0, stroke = null, strokeWidth = 2, gradient = null, mode = 'contain' } = options;
         if (!ctx || !canvas) {
             return false;
         }
@@ -660,15 +888,11 @@ class FileCity {
             const { width, height } = dims;
             const innerWidth = Math.max(1, canvas.width - padding * 2);
             const innerHeight = Math.max(1, canvas.height - padding * 2);
-            const canvasAspect = innerWidth / innerHeight;
-            const imageAspect = width / height;
-            let drawWidth = innerWidth;
-            let drawHeight = innerHeight;
-            if (imageAspect > canvasAspect) {
-                drawHeight = drawWidth / imageAspect;
-            } else {
-                drawWidth = drawHeight * imageAspect;
-            }
+            const scale = mode === 'cover'
+                ? Math.max(innerWidth / width, innerHeight / height)
+                : Math.min(innerWidth / width, innerHeight / height);
+            const drawWidth = width * scale;
+            const drawHeight = height * scale;
             const dx = (canvas.width - drawWidth) / 2;
             const dy = (canvas.height - drawHeight) / 2;
             try {
@@ -774,7 +998,8 @@ class FileCity {
                 from: 'rgba(0, 255, 255, 0.1)',
                 to: 'rgba(255, 0, 128, 0.18)',
                 alpha: 0.9
-            }
+            },
+            mode: 'cover'
         });
 
         this.videoRimTexture.needsUpdate = true;
@@ -801,7 +1026,8 @@ class FileCity {
                 from: 'rgba(0, 255, 255, 0.18)',
                 to: 'rgba(255, 0, 128, 0.15)',
                 alpha: 0.9
-            }
+            },
+            mode: 'cover'
         });
         this.videoCanvasTexture.needsUpdate = true;
 
@@ -823,22 +1049,29 @@ class FileCity {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        ctx.font = '18px "Courier New", monospace';
+    ctx.font = '14px "Courier New", monospace';
         ctx.textBaseline = 'top';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#00f5ff';
 
-        const offsetColumnX = 24;
-        const lineHeight = 34;
-        const maxLines = Math.floor((canvas.height - 60) / lineHeight);
+        const topPadding = 24;
+        const bottomPadding = 24;
+    const lineHeight = 22;
+        const usableHeight = canvas.height - topPadding - bottomPadding;
+        const maxLines = Math.max(1, Math.floor(usableHeight / lineHeight));
 
-        ctx.globalCompositeOperation = 'source-over';
+        const offsetColumnX = 20;
+        const hexColumnX = 110;
+    const asciiBaseX = canvas.width - 140;
 
         const renderLines = lines.slice(0, maxLines);
         renderLines.forEach((line, index) => {
-            const y = 20 + index * lineHeight;
-            ctx.fillStyle = '#00f5ff';
-            ctx.fillText(`${line.offset}: ${line.hex}`, offsetColumnX, y);
-            ctx.fillStyle = '#ff6cff';
-            ctx.fillText(line.ascii, offsetColumnX, y + 18);
+            const y = topPadding + index * lineHeight;
+            ctx.fillText(`${line.offset}:`, offsetColumnX, y);
+            ctx.fillText(line.hex, hexColumnX, y);
+            const hexWidth = ctx.measureText(line.hex).width;
+            const asciiX = Math.min(asciiBaseX, hexColumnX + hexWidth + 24);
+            ctx.fillText(line.ascii, asciiX, y);
         });
 
         const texture = new THREE.CanvasTexture(canvas);
@@ -1155,6 +1388,8 @@ class FileCity {
                 this.ensureBuildingGhost(building);
                 return;
             }
+            this.removeHexPreviewCube(building);
+            this.restoreBaseGeometry(building);
             const { topMaterial } = building.userData;
             topMaterial.map = texture;
             topMaterial.opacity = 1;
@@ -1200,6 +1435,7 @@ class FileCity {
                     this.videoRimCtx.clearRect(0, 0, this.videoRimCanvas.width, this.videoRimCanvas.height);
                 }
                 if (this.mediaBuilding.userData) {
+                    this.setVideoRimShape(this.mediaBuilding, false);
                     const { topMaterial, rimMaterial, previousMap, previousRimMap, previousState } = this.mediaBuilding.userData;
                     if (topMaterial) {
                         topMaterial.map = previousMap || null;
@@ -1215,6 +1451,13 @@ class FileCity {
                     this.mediaBuilding.userData.previousRimMap = null;
                     this.mediaBuilding.userData.previousState = null;
                     this.mediaBuilding.userData.rimGeneratedTexture = null;
+                    const restoredState = previousState || 'ghost';
+                    if (restoredState === 'loaded' && topMaterial && topMaterial.map) {
+                        this.ensureHexPreviewCube(this.mediaBuilding, topMaterial.map);
+                    } else {
+                        this.removeHexPreviewCube(this.mediaBuilding);
+                        this.restoreBaseGeometry(this.mediaBuilding);
+                    }
                 }
             }
 
@@ -1259,6 +1502,7 @@ class FileCity {
                 if (this.activeMedia !== 'video' || this.mediaBuilding !== building) {
                     return;
                 }
+                this.setVideoRimShape(building, true);
                 this.updateVideoCanvases(true);
                 topMaterial.map = this.videoCanvasTexture;
                 topMaterial.opacity = 1;
@@ -1337,6 +1581,15 @@ class FileCity {
         sprite.position.y = height + (isFile ? 0.8 : 1.2);
         sprite.scale.set(isFile ? 3.2 : 4, 1, 1);
         building.add(sprite);
+
+        sprite.userData = sprite.userData || {};
+        sprite.userData.isFileLabel = isFile;
+        if (building.userData) {
+            if (!Array.isArray(building.userData.labels)) {
+                building.userData.labels = [];
+            }
+            building.userData.labels.push(sprite);
+        }
     }
 
     animate() {
