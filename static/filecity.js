@@ -263,7 +263,7 @@ class FileCity {
             }
             event.preventDefault();
             const zoomSpeed = 0.0025;
-            const delta = event.deltaY * zoomSpeed;
+            const delta = -event.deltaY * zoomSpeed;
             const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
             this.camera.position.addScaledVector(forward, delta);
             this.updateDisplayedCoordinates();
