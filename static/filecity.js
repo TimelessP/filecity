@@ -84,7 +84,8 @@ class FileCity {
             text: 0x80ff80,
             grid: 0x004040,
             glow: 0x00ffff,
-            favourite: 0xff8c00
+            favourite: 0xff8c00,
+            mediaPaused: 0x9d4dff
         };
 
         this.init();
@@ -189,6 +190,10 @@ class FileCity {
                 event.preventDefault();
                 const offset = event.shiftKey ? 60 : 10;
                 this.skipActiveMedia(offset);
+            }
+            if (event.code === 'Enter' || event.code === 'NumpadEnter') {
+                event.preventDefault();
+                this.toggleMediaPlayback();
             }
         });
 
@@ -664,8 +669,10 @@ class FileCity {
             pavement,
             pavementBaseColor: pavement && pavement.material ? pavement.material.color.clone() : null,
             mediaActive: false,
+            mediaPaused: false,
             pavementHighlightColor: null,
-            pavementHighlightHSL: null
+            pavementHighlightHSL: null,
+            pavementPausedColor: pavement ? new THREE.Color(this.colors.mediaPaused) : null
         };
 
         if (file.is_favourite) {
@@ -737,6 +744,15 @@ class FileCity {
                 return;
             }
 
+            if (data.mediaPaused) {
+                if (!data.pavementPausedColor) {
+                    data.pavementPausedColor = new THREE.Color(this.colors.mediaPaused);
+                }
+                material.color.copy(data.pavementPausedColor);
+                material.needsUpdate = true;
+                return;
+            }
+
             if (!data.pavementHighlightColor) {
                 data.pavementHighlightColor = new THREE.Color(this.colors.favourite);
             }
@@ -747,8 +763,9 @@ class FileCity {
             }
 
             const highlightHSL = data.pavementHighlightHSL;
-            const lightness = Math.min(1, 0.55 + pulse * 0.45);
+            const lightness = THREE.MathUtils.clamp(0.4 + pulse * 0.5, 0, 1);
             material.color.setHSL(highlightHSL.h, highlightHSL.s, lightness);
+            material.needsUpdate = true;
         });
     }
 
@@ -1390,7 +1407,7 @@ class FileCity {
         this.audioElement.play().catch(() => {});
         this.activeMedia = 'audio';
         this.mediaBuilding = building;
-        this.setBuildingMediaState(building, true);
+    this.setBuildingMediaState(building, true, false);
     }
 
     playVideo(building) {
@@ -1410,7 +1427,7 @@ class FileCity {
             building.userData.previewMode = 'video';
             this.mediaBuilding = building;
             this.activeMedia = 'video';
-            this.setBuildingMediaState(building, true);
+            this.setBuildingMediaState(building, true, false);
             this.ensurePreviewForBuilding(building);
             this.updateVideoFrame(true);
         };
@@ -1496,26 +1513,29 @@ class FileCity {
         this.mediaBuilding = null;
     }
 
-    setBuildingMediaState(building, isActive) {
+    setBuildingMediaState(building, isActive, isPaused = false) {
         if (!building || !building.userData) {
             return;
         }
         const data = building.userData;
         data.mediaActive = !!isActive;
+        data.mediaPaused = !!(isActive && isPaused);
 
         const pavement = data.pavement;
-        if (!pavement || !pavement.material) {
+        const material = pavement && pavement.material;
+        if (!pavement || !material) {
             return;
         }
 
         if (!data.pavementBaseColor) {
-            data.pavementBaseColor = pavement.material.color.clone();
+            data.pavementBaseColor = material.color.clone();
         }
 
         if (!isActive) {
             if (data.pavementBaseColor) {
-                pavement.material.color.copy(data.pavementBaseColor);
+                material.color.copy(data.pavementBaseColor);
             }
+            material.needsUpdate = true;
             return;
         }
 
@@ -1526,6 +1546,21 @@ class FileCity {
             const hsl = { h: 0, s: 0, l: 0 };
             data.pavementHighlightColor.getHSL(hsl);
             data.pavementHighlightHSL = hsl;
+        }
+        if (!data.pavementPausedColor) {
+            data.pavementPausedColor = new THREE.Color(this.colors.mediaPaused);
+        }
+
+        if (data.mediaPaused && data.pavementPausedColor) {
+            material.color.copy(data.pavementPausedColor);
+            material.needsUpdate = true;
+            return;
+        }
+
+        material.needsUpdate = true;
+        if (data.pavementHighlightHSL) {
+            const hsl = data.pavementHighlightHSL;
+            material.color.setHSL(hsl.h, hsl.s, 0.7);
         }
     }
 
@@ -1555,6 +1590,44 @@ class FileCity {
         }
         if (this.activeMedia === 'video') {
             clampAndApply(this.videoElement);
+        }
+    }
+
+    toggleMediaPlayback() {
+        if (!this.activeMedia) {
+            return;
+        }
+
+        const building = this.mediaBuilding;
+
+        if (this.activeMedia === 'audio' && this.audioElement) {
+            if (this.audioElement.paused) {
+                this.audioElement.play().catch(() => {});
+                if (building) {
+                    this.setBuildingMediaState(building, true, false);
+                }
+            } else {
+                this.audioElement.pause();
+                if (building) {
+                    this.setBuildingMediaState(building, true, true);
+                }
+            }
+            return;
+        }
+
+        if (this.activeMedia === 'video' && this.videoElement) {
+            if (this.videoElement.paused) {
+                this.videoElement.play().catch(() => {});
+                if (building) {
+                    this.setBuildingMediaState(building, true, false);
+                }
+            } else {
+                this.videoElement.pause();
+                if (building) {
+                    this.setBuildingMediaState(building, true, true);
+                }
+                this.updateVideoFrame(true);
+            }
         }
     }
 

@@ -1,0 +1,32 @@
+# FileCity
+
+FileCity is a stylised 3D cyberpunk interface for exploring a local file system. The world is rendered with Three.js, turning directories into glowing towers and file previews into volumetric cubes that hover above each structure.
+
+## Features
+- Dynamic city layout that visualises folders as buildings with procedurally textured pavements.
+- Pointer-lock flight controls with roll, custom zoom, and camera snap-to-preview behaviour.
+- Real-time media previews for images, audio, video, and hex-dumped binaries.
+- Favourite tagging, hidden file toggling, and persistent navigation history.
+- Reactive pavements that glow orange while media plays and shift to violet while paused.
+
+## Controls
+- `Mouse` look, `WASD` strafe/advance, `SPACE` / `CTRL` ascend or descend.
+- `Q` / `E` roll, `SHIFT` precision throttle, `C` level the horizon.
+- `Mouse Wheel` move forward/backward, `Left Click` enter directories, `Right Click` focus previews, hold for context actions.
+- `Backspace` or `U` go to parent, `H` home, `R` refresh directory.
+- `V` toggle hidden entries (also stops media), `F` toggle favourite, `.` cycle preview detail.
+- `P` stop media, `Enter` (or `Numpad Enter`) pause/resume playback.
+- `[` / `]` skip ±10 s, hold `SHIFT` for ±60 s stepping.
+
+## Running Locally
+1. Install dependencies: `pip install -r requirements.txt`.
+2. Launch the backend: `python main.py`.
+3. Open a browser at `http://localhost:5000` (default Flask host) to enter FileCity.
+
+## Development Notes
+- Static assets live under `static/`; primary client logic is in `static/filecity.js`.
+- API routes serving directory and preview data are defined in the Flask app.
+- When updating preview logic or media handling, keep `setBuildingMediaState` in sync so pavements reflect the correct status.
+
+## License
+FileCity is released under the MIT License. See the `LICENSE` file for full terms.
