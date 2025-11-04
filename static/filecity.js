@@ -44,6 +44,13 @@ class FileCity {
         this.defaultViewState = null;
         this.pendingStackPushPath = null;
 
+    // Grid layout
+    this.gridColumns = 8;
+    this.gridSpacing = 8;
+    this.pavementGeometry = null;
+    this.pavementMaterial = null;
+    this.pavementTexture = null;
+
         // Media/file type helpers
         this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'apng', 'tif', 'tiff', 'ico']);
         this.audioExtensions = new Set(['mp3', 'ogg', 'oga', 'wav', 'aac', 'm4a', 'flac', 'opus', 'weba']);
@@ -295,28 +302,20 @@ class FileCity {
     }
 
     createNeonGrid() {
-        const gridSize = 200;
-        const divisions = 40;
-        const grid = new THREE.GridHelper(gridSize, divisions, this.colors.grid, this.colors.grid);
-        grid.material.opacity = 0.3;
-        grid.material.transparent = true;
-        this.scene.add(grid);
-
-        const centerLineGeometry = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(-gridSize / 2, 0, 0),
-            new THREE.Vector3(gridSize / 2, 0, 0)
-        ]);
-        const centerLineMaterial = new THREE.LineBasicMaterial({
-            color: this.colors.glow,
-            opacity: 0.8,
-            transparent: true
+        const planeSize = this.gridSpacing * 64;
+        const geometry = new THREE.PlaneGeometry(planeSize, planeSize);
+        const material = new THREE.MeshBasicMaterial({
+            color: 0x001020,
+            transparent: true,
+            opacity: 0.55,
+            depthWrite: false
         });
-        const centerLineX = new THREE.Line(centerLineGeometry, centerLineMaterial);
-        this.scene.add(centerLineX);
-
-        const centerLineZ = new THREE.Line(centerLineGeometry, centerLineMaterial);
-        centerLineZ.rotation.y = Math.PI / 2;
-        this.scene.add(centerLineZ);
+        const plane = new THREE.Mesh(geometry, material);
+        plane.rotation.x = -Math.PI / 2;
+        plane.position.y = -0.05;
+        plane.renderOrder = -20;
+        this.scene.add(plane);
+        this.basePlane = plane;
     }
 
     createParticleSystem() {
@@ -351,6 +350,87 @@ class FileCity {
 
         const particleSystem = new THREE.Points(particles, particleMaterial);
         this.scene.add(particleSystem);
+    }
+
+    ensurePavementAssets() {
+        if (!this.pavementTexture) {
+            this.pavementTexture = this.createPavementTexture();
+            if (this.pavementTexture) {
+                this.pavementTexture.wrapS = THREE.ClampToEdgeWrapping;
+                this.pavementTexture.wrapT = THREE.ClampToEdgeWrapping;
+                this.pavementTexture.magFilter = THREE.LinearFilter;
+                this.pavementTexture.minFilter = THREE.LinearMipMapLinearFilter;
+                this.pavementTexture.encoding = THREE.sRGBEncoding;
+                if (this.renderer && this.renderer.capabilities && typeof this.renderer.capabilities.getMaxAnisotropy === 'function') {
+                    this.pavementTexture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+                }
+                this.pavementTexture.needsUpdate = true;
+            }
+        }
+        if (!this.pavementMaterial && this.pavementTexture) {
+            this.pavementMaterial = new THREE.MeshBasicMaterial({
+                map: this.pavementTexture,
+                transparent: true,
+                opacity: 1,
+                toneMapped: false,
+                depthWrite: false
+            });
+        }
+        if (!this.pavementGeometry) {
+            this.pavementGeometry = new THREE.PlaneGeometry(this.gridSpacing, this.gridSpacing);
+        }
+    }
+
+    createPavementTexture() {
+        const size = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        ctx.clearRect(0, 0, size, size);
+
+        const glowColor = 'rgba(0, 255, 255,';
+        const walkwayRatio = 0.64;
+        const streetMargin = (1 - walkwayRatio) / 2;
+        const streetWidth = streetMargin * size;
+        const lineThickness = streetWidth * 0.5;
+        const lineHalf = lineThickness / 2;
+        const centerOffset = streetWidth / 2;
+
+        ctx.fillStyle = `${glowColor}0.5)`;
+        ctx.fillRect(0, centerOffset - lineHalf, size, lineThickness);
+        ctx.fillRect(0, size - centerOffset - lineHalf, size, lineThickness);
+        ctx.fillRect(centerOffset - lineHalf, 0, lineThickness, size);
+        ctx.fillRect(size - centerOffset - lineHalf, 0, lineThickness, size);
+
+        const walkwaySize = walkwayRatio * size;
+        const walkwayOffset = (size - walkwaySize) / 2;
+        const cornerRadius = walkwaySize * 0.16;
+
+        ctx.fillStyle = `${glowColor}1)`;
+        this.drawRoundedRect(ctx, walkwayOffset, walkwayOffset, walkwaySize, walkwaySize, cornerRadius);
+        ctx.fill();
+
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    drawRoundedRect(ctx, x, y, width, height, radius) {
+        const r = Math.min(radius, width / 2, height / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + width - r, y);
+        ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+        ctx.lineTo(x + width, y + height - r);
+        ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+        ctx.lineTo(x + r, y + height);
+        ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
     }
 
     async loadDirectory(path = null) {
@@ -425,11 +505,17 @@ class FileCity {
             this.removePreviewCube(building);
             building.traverse(child => {
                 if (child.isMesh || child.isLine || child.isSprite) {
+                    const retainShared = !!(child.userData && child.userData.retainShared);
                     if (child.geometry) {
-                        child.geometry.dispose();
+                        if (!retainShared) {
+                            child.geometry.dispose();
+                        }
                     }
                     const disposeMaterial = (material) => {
                         if (!material) return;
+                        if (retainShared) {
+                            return;
+                        }
                         if (material.map && !this.previewCache.has(material.map)) {
                             material.map = null;
                         }
@@ -448,12 +534,17 @@ class FileCity {
     }
 
     createBuildings() {
-        const gridSize = 8;
-        const spacing = 8;
+        const columns = this.gridColumns;
+        const spacing = this.gridSpacing;
+        const rows = Math.max(1, Math.ceil(this.fileData.length / columns));
+        const halfWidth = (columns - 1) * spacing / 2;
+        const halfDepth = (rows - 1) * spacing / 2;
 
         this.fileData.forEach((file, index) => {
-            const x = (index % gridSize) * spacing - (gridSize * spacing) / 2;
-            const z = Math.floor(index / gridSize) * spacing - (gridSize * spacing) / 2;
+            const column = index % columns;
+            const row = Math.floor(index / columns);
+            const x = column * spacing - halfWidth;
+            const z = row * spacing - halfDepth;
 
             const building = this.createBuilding(file, x, z);
             if (building) {
@@ -491,6 +582,17 @@ class FileCity {
 
         const group = new THREE.Group();
         group.position.set(x, 0, z);
+
+        this.ensurePavementAssets();
+        if (this.pavementGeometry && this.pavementMaterial) {
+            const pavement = new THREE.Mesh(this.pavementGeometry, this.pavementMaterial);
+            pavement.rotation.x = -Math.PI / 2;
+            pavement.position.y = 0.01;
+            pavement.renderOrder = -10;
+            pavement.userData = pavement.userData || {};
+            pavement.userData.retainShared = true;
+            group.add(pavement);
+        }
 
         const geometry = new THREE.BoxGeometry(baseSize, height, baseSize);
         const fillMaterial = new THREE.MeshBasicMaterial({
@@ -1529,6 +1631,9 @@ class FileCity {
     }
 
     toggleHidden() {
+        if (this.activeMedia) {
+            this.stopMedia();
+        }
         this.showHidden = !this.showHidden;
         this.applyFileFilter();
     }
