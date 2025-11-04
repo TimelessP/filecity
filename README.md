@@ -2,6 +2,10 @@
 
 FileCity is a stylised 3D cyberpunk interface for exploring a local file system. The world is rendered with Three.js, turning directories into glowing towers and file previews into volumetric cubes that hover above each structure.
 
+![Downtown vista](screenshots/Screenshot%20from%202025-11-04%2023-40-24.png)
+![Preview focus](screenshots/Screenshot%20from%202025-11-04%2023-41-08.png)
+![Media playback glow](screenshots/Screenshot%20from%202025-11-04%2023-42-22.png)
+
 ## Features
 - Dynamic city layout that visualises folders as buildings with procedurally textured pavements.
 - Pointer-lock flight controls with roll, custom zoom, and camera snap-to-preview behaviour.
