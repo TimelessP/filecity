@@ -44,6 +44,16 @@ class FileCity {
         this.defaultViewState = null;
         this.pendingStackPushPath = null;
 
+        // Media/file type helpers
+        this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'apng', 'tif', 'tiff', 'ico']);
+        this.audioExtensions = new Set(['mp3', 'ogg', 'oga', 'wav', 'aac', 'm4a', 'flac', 'opus', 'weba']);
+        this.videoExtensions = new Set(['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'm4v']);
+
+        // Right-click hold behaviour
+        this.rightClickHoldTimer = null;
+        this.rightClickHoldTarget = null;
+        this.rightClickHoldDelay = 2000;
+
         // Media playback
         this.activeMedia = null; // 'audio' | 'video'
         this.audioElement = null;
@@ -176,17 +186,43 @@ class FileCity {
 
         document.addEventListener('pointerlockchange', () => {
             this.isPointerLocked = document.pointerLockElement === document.body;
+            if (!this.isPointerLocked) {
+                this.cancelRightClickHold();
+            }
         });
 
         document.addEventListener('contextmenu', (event) => {
             event.preventDefault();
+            this.cancelRightClickHold();
         });
 
         document.addEventListener('mousedown', (event) => {
             if (event.button === 2) {
                 event.preventDefault();
                 event.stopPropagation();
-                this.focusPreviewUnderCrosshair();
+                const building = this.getBuildingUnderCrosshair();
+                this.focusPreviewUnderCrosshair(building);
+                this.startRightClickHold(building);
+            } else {
+                this.cancelRightClickHold();
+            }
+        });
+
+        document.addEventListener('mouseup', (event) => {
+            if (event.button === 2) {
+                event.preventDefault();
+                event.stopPropagation();
+                this.cancelRightClickHold();
+            }
+        });
+
+        window.addEventListener('blur', () => {
+            this.cancelRightClickHold();
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') {
+                this.cancelRightClickHold();
             }
         });
 
@@ -320,6 +356,7 @@ class FileCity {
     async loadDirectory(path = null) {
         const targetPath = path ?? null;
         try {
+            this.cancelRightClickHold();
             this.stopMedia();
 
             const url = targetPath ? `/api/browse?path=${encodeURIComponent(targetPath)}` : '/api/browse';
@@ -576,7 +613,7 @@ class FileCity {
             return 'directory';
         }
         const ext = this.getFileExtension(file.name);
-        if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+        if (this.isImagePreviewExtension(ext)) {
             return 'image';
         }
         return 'hex';
@@ -603,7 +640,12 @@ class FileCity {
         this.pendingPreviewLoads.add(key);
 
         if (mode === 'image') {
-            fetch(`/api/file-preview?path=${encodeURIComponent(path)}&t=${Date.now()}`)
+            const imageUrl = this.getFilePreviewUrl(path);
+            if (!imageUrl) {
+                this.pendingPreviewLoads.delete(key);
+                return;
+            }
+            fetch(imageUrl)
                 .then((response) => {
                     if (!response.ok) {
                         throw new Error('image preview failed');
@@ -873,8 +915,8 @@ class FileCity {
         });
     }
 
-    focusPreviewUnderCrosshair() {
-        const building = this.getBuildingUnderCrosshair();
+    focusPreviewUnderCrosshair(preselectedBuilding = null) {
+        const building = preselectedBuilding || this.getBuildingUnderCrosshair();
         if (!building || !building.userData || !building.userData.previewCube) {
             return;
         }
@@ -940,6 +982,46 @@ class FileCity {
 
         const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
         this.camera.quaternion.setFromEuler(baseEuler);
+    }
+
+    startRightClickHold(building) {
+        this.cancelRightClickHold();
+        if (!building || !building.userData || !building.userData.fileInfo) {
+            return;
+        }
+        const fileInfo = building.userData.fileInfo;
+        if (fileInfo.is_directory || !fileInfo.path) {
+            return;
+        }
+        this.rightClickHoldTarget = building;
+        this.rightClickHoldTimer = window.setTimeout(() => {
+            if (!this.rightClickHoldTarget || !this.isBuildingCurrent(this.rightClickHoldTarget)) {
+                this.cancelRightClickHold();
+                return;
+            }
+            this.openBuildingInNewTab(this.rightClickHoldTarget);
+            this.cancelRightClickHold();
+        }, this.rightClickHoldDelay);
+    }
+
+    cancelRightClickHold() {
+        if (this.rightClickHoldTimer) {
+            clearTimeout(this.rightClickHoldTimer);
+            this.rightClickHoldTimer = null;
+        }
+        this.rightClickHoldTarget = null;
+    }
+
+    openBuildingInNewTab(building) {
+        const fileInfo = building?.userData?.fileInfo;
+        if (!fileInfo || fileInfo.is_directory || !fileInfo.path) {
+            return;
+        }
+        const url = this.getFilePreviewUrl(fileInfo.path);
+        if (!url) {
+            return;
+        }
+        window.open(url, '_blank', 'noopener,noreferrer');
     }
 
     getCurrentViewState() {
@@ -1075,11 +1157,11 @@ class FileCity {
         const file = building.userData.fileInfo;
         const ext = this.getFileExtension(file.name);
 
-        if (['mp3', 'ogg'].includes(ext)) {
+        if (this.isAudioFileExtension(ext)) {
             this.playAudio(building);
             return;
         }
-        if (['mp4'].includes(ext)) {
+        if (this.isVideoFileExtension(ext)) {
             this.playVideo(building);
             return;
         }
@@ -1089,10 +1171,10 @@ class FileCity {
 
     playAudio(building) {
         const file = building.userData.fileInfo;
-        const src = `/api/file-preview?path=${encodeURIComponent(file.path)}&t=${Date.now()}`;
+        const src = this.getFilePreviewUrl(file.path);
         this.stopMedia();
 
-        if (!this.audioElement) {
+        if (!this.audioElement || !src) {
             return;
         }
         this.audioElement.src = src;
@@ -1103,10 +1185,10 @@ class FileCity {
 
     playVideo(building) {
         const file = building.userData.fileInfo;
-        const src = `/api/file-preview?path=${encodeURIComponent(file.path)}&t=${Date.now()}`;
+        const src = this.getFilePreviewUrl(file.path);
         this.stopMedia();
 
-        if (!this.videoElement || !this.videoCanvasTexture) {
+        if (!this.videoElement || !this.videoCanvasTexture || !src) {
             return;
         }
 
@@ -1203,6 +1285,44 @@ class FileCity {
             return '';
         }
         return filename.substring(idx + 1).toLowerCase();
+    }
+
+    isAudioFileExtension(extension) {
+        if (!extension) {
+            return false;
+        }
+        return this.audioExtensions.has(extension);
+    }
+
+    isVideoFileExtension(extension) {
+        if (!extension) {
+            return false;
+        }
+        return this.videoExtensions.has(extension);
+    }
+
+    isImagePreviewExtension(extension) {
+        if (!extension) {
+            return false;
+        }
+        return this.imagePreviewExtensions.has(extension);
+    }
+
+    getFilePreviewUrl(path, extraParams = {}, options = {}) {
+        if (!path) {
+            return null;
+        }
+        const params = new URLSearchParams();
+        params.set('path', path);
+        Object.entries(extraParams || {}).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) {
+                params.set(key, value);
+            }
+        });
+        if (options.cacheBust !== false) {
+            params.set('t', Date.now().toString());
+        }
+        return `/api/file-preview?${params.toString()}`;
     }
 
     addBuildingLabel(building, text, height, isFile = false) {
@@ -1359,6 +1479,7 @@ class FileCity {
             } else {
                 this.favourites.delete(path);
             }
+            building.userData.fileInfo.is_favourite = shouldFavourite;
             this.applyFavouriteStyling(building, shouldFavourite);
         } catch (error) {
             console.warn('Failed to toggle favourite:', error);
@@ -1378,6 +1499,7 @@ class FileCity {
     }
 
     reloadCurrentDirectory() {
+        this.cancelRightClickHold();
         if (this.currentPath) {
             this.setPendingViewState(this.getCurrentViewState());
             this.pendingStackPushPath = null;
@@ -1397,19 +1519,21 @@ class FileCity {
     }
 
     goToParentDirectory() {
+        this.cancelRightClickHold();
         if (!this.currentPath) {
-            this.setPendingViewState(this.getDefaultViewState());
+            this.viewStack = [];
             this.pendingStackPushPath = null;
-            this.loadDirectory();
+            this.setPendingViewState(this.getDefaultViewState());
+            this.applyPendingViewState();
             return;
         }
 
         const parts = this.currentPath.split(/[\\/]/).filter(Boolean);
-        if (parts.length === 0) {
+        if (!parts.length) {
             this.viewStack = [];
-            this.setPendingViewState(this.getDefaultViewState());
             this.pendingStackPushPath = null;
-            this.loadDirectory();
+            this.setPendingViewState(this.getDefaultViewState());
+            this.applyPendingViewState();
             return;
         }
 
@@ -1422,6 +1546,7 @@ class FileCity {
     }
 
     goToHome() {
+        this.cancelRightClickHold();
         this.viewStack = [];
         this.setPendingViewState(this.getDefaultViewState());
         this.pendingStackPushPath = null;
