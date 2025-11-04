@@ -46,7 +46,7 @@ class FileCity {
     this.textureLoader = new THREE.TextureLoader();
 
     // Geometry preferences
-    this.hexCubeSize = 2.4;
+    this.previewCubeMaxSize = 2.4;
 
     // Media playback state
     this.activeMedia = null; // 'audio' | 'video'
@@ -578,7 +578,10 @@ class FileCity {
             baseWidth: width,
             baseDepth: depth,
             labels: [],
-            hexCubeActive: false,
+            previewCube: null,
+            previewCubeActive: false,
+            previewCubeSize: null,
+            previewTexture: null,
         };
 
         if (file.is_directory) {
@@ -602,17 +605,18 @@ class FileCity {
         if (!texture) return;
         this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
-        topMaterial.map = texture;
+        building.userData.previewTexture = texture;
+        topMaterial.map = this.ghostTexture;
         topMaterial.opacity = 1;
         topMaterial.needsUpdate = true;
-        this.setRimTexture(building, texture);
-        this.ensureHexPreviewCube(building, texture);
+        this.setRimTexture(building, this.ghostTexture);
         building.userData.textureState = 'loaded';
+        this.cleanupLegacyPreviewMeshes(building, texture);
+        this.refreshPreviewCube(building);
     }
 
     applyGhostTexture(building) {
         if (!this.ghostTexture) return;
-        this.removeHexPreviewCube(building);
         this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
         topMaterial.map = this.ghostTexture;
@@ -620,11 +624,12 @@ class FileCity {
         topMaterial.needsUpdate = true;
         this.setRimTexture(building, this.ghostTexture);
         building.userData.textureState = 'ghost';
+        building.userData.previewTexture = null;
+        this.refreshPreviewCube(building);
     }
 
     applyDirectoryTexture(building) {
         if (!this.directoryTexture) return;
-        this.removeHexPreviewCube(building);
         this.restoreBaseGeometry(building);
         const { topMaterial } = building.userData;
         topMaterial.map = this.directoryTexture;
@@ -632,6 +637,8 @@ class FileCity {
         topMaterial.needsUpdate = true;
         this.setRimTexture(building, this.directoryTexture);
         building.userData.textureState = 'directory';
+        building.userData.previewTexture = null;
+        this.refreshPreviewCube(building);
     }
 
     setRimTexture(building, sourceTexture, options = {}) {
@@ -687,67 +694,91 @@ class FileCity {
         }
     }
 
-    ensureHexPreviewCube(building, texture) {
-        if (!building || !building.userData || !texture) {
+    updatePreviewCube(building, texture, options = {}) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        if (!texture) {
+            this.removePreviewCube(building);
             return;
         }
 
         const data = building.userData;
         if (data.fileInfo && data.fileInfo.is_directory) {
+            this.removePreviewCube(building);
             return;
         }
 
-        const baseHeight = data.baseHeight || data.height || this.hexCubeSize;
-        const baseWidth = data.baseWidth || data.width || this.hexCubeSize;
-        const baseDepth = data.baseDepth || data.depth || baseWidth;
-        const cubeSize = Math.max(0.1, Math.min(this.hexCubeSize, baseHeight, baseWidth, baseDepth));
-        const offsetFromTop = cubeSize / 2 + 0.05;
-        const topY = (data.height || baseHeight) - offsetFromTop;
+        const maxSize = options.maxSize ?? this.previewCubeMaxSize;
+        const baseHeight = data.baseHeight ?? data.height ?? maxSize;
+        const baseWidth = data.baseWidth ?? data.width ?? maxSize;
+        const baseDepth = data.baseDepth ?? data.depth ?? baseWidth;
+        const cubeSize = Math.max(0.1, Math.min(maxSize, baseHeight, baseWidth, baseDepth));
+        const verticalGap = typeof options.verticalGap === 'number' ? options.verticalGap : 0.1;
+        const buildingHeight = data.height ?? baseHeight;
+        const topY = buildingHeight + cubeSize / 2 + verticalGap;
 
-        let cube = data.hexPreviewCube;
+        this.cleanupLegacyPreviewMeshes(building, texture);
+
+        let cube = data.previewCube;
+        const materialProps = {
+            transparent: options.transparent ?? true,
+            opacity: options.opacity ?? 1,
+            depthWrite: options.depthWrite ?? true
+        };
+
         if (!cube) {
             const cubeGeometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
             const cubeMaterial = new THREE.MeshBasicMaterial({
-                map: texture,
-                transparent: true,
-                opacity: 1,
-                depthWrite: false
+                ...materialProps,
+                map: texture
             });
             texture.needsUpdate = true;
             cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
-            cube.position.y = topY;
+            cube.name = 'previewCube';
+            cube.userData.previewType = 'preview-cube';
+            cube.position.set(options.offsetX ?? 0, topY, options.offsetZ ?? 0);
             building.add(cube);
-            data.hexPreviewCube = cube;
+            data.previewCube = cube;
         } else {
             if (cube.geometry) {
                 cube.geometry.dispose();
             }
             cube.geometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
-            cube.position.y = topY;
-            if (cube.material) {
+            cube.position.set(options.offsetX ?? 0, topY, options.offsetZ ?? 0);
+
+            if (!cube.material) {
+                cube.material = new THREE.MeshBasicMaterial({
+                    ...materialProps,
+                    map: texture
+                });
+            } else {
                 cube.material.map = texture;
-                cube.material.needsUpdate = true;
+                cube.material.opacity = materialProps.opacity;
+                cube.material.transparent = materialProps.transparent;
+                cube.material.depthWrite = materialProps.depthWrite;
             }
             texture.needsUpdate = true;
+            cube.material.needsUpdate = true;
         }
 
-        cube.position.x = 0;
-        cube.position.z = 0;
-
-        data.hexCubeActive = true;
-        data.hexCubeSize = cubeSize;
+        data.previewCubeActive = true;
+        data.previewCubeSize = cubeSize;
     }
 
-    removeHexPreviewCube(building) {
+    removePreviewCube(building) {
         if (!building || !building.userData) {
             return;
         }
 
-        const data = building.userData;
-        const cube = data.hexPreviewCube;
+    const data = building.userData;
+    this.cleanupLegacyPreviewMeshes(building, data.previewTexture);
+
+    const cube = data.previewCube;
         if (!cube) {
-            data.hexCubeActive = false;
-            data.hexCubeSize = null;
+            data.previewCubeActive = false;
+            data.previewCubeSize = null;
             return;
         }
 
@@ -759,9 +790,111 @@ class FileCity {
             cube.material.map = null;
             cube.material.dispose();
         }
-        data.hexPreviewCube = null;
-        data.hexCubeActive = false;
-        data.hexCubeSize = null;
+
+        data.previewCube = null;
+        data.previewCubeActive = false;
+        data.previewCubeSize = null;
+    }
+
+    cleanupLegacyPreviewMeshes(building, expectedTexture = null) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const data = building.userData;
+        const legacyKeys = ['hexPreviewCube', 'previewCubeLegacy'];
+        for (const key of legacyKeys) {
+            const legacyMesh = data[key];
+            if (legacyMesh) {
+                this.disposePreviewMesh(building, legacyMesh);
+                data[key] = null;
+            }
+        }
+
+        if (!expectedTexture) {
+            return;
+        }
+
+        const protectedMeshes = new Set([
+            data.mesh?.uuid,
+            data.rimMesh?.uuid,
+            data.previewCube?.uuid
+        ].filter(Boolean));
+
+        for (const child of [...building.children]) {
+            if (!(child instanceof THREE.Mesh)) {
+                continue;
+            }
+            if (protectedMeshes.has(child.uuid)) {
+                continue;
+            }
+
+            const materials = Array.isArray(child.material) ? child.material : [child.material];
+            const hasExpectedTexture = materials.some(mat => mat && mat.map === expectedTexture);
+            if (!hasExpectedTexture) {
+                continue;
+            }
+
+            this.disposePreviewMesh(building, child);
+        }
+    }
+
+    disposePreviewMesh(building, mesh) {
+        if (!mesh) {
+            return;
+        }
+
+        building.remove(mesh);
+
+        if (mesh.geometry) {
+            mesh.geometry.dispose();
+        }
+
+        const disposeMaterial = (material) => {
+            if (!material) {
+                return;
+            }
+            if (material.map) {
+                material.map = null;
+            }
+            material.dispose();
+        };
+
+        if (Array.isArray(mesh.material)) {
+            mesh.material.forEach(disposeMaterial);
+        } else {
+            disposeMaterial(mesh.material);
+        }
+    }
+
+    shouldUsePreviewCube(building, textureState) {
+        if (!building || !building.userData) {
+            return false;
+        }
+
+        const info = building.userData.fileInfo;
+        if (!info || info.is_directory) {
+            return false;
+        }
+
+        // Show preview cubes for hex-textured files to avoid roof z-fighting.
+        return textureState === 'loaded';
+    }
+
+    refreshPreviewCube(building, textureState = null) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const state = textureState ?? building.userData.textureState;
+        const { topMaterial, previewTexture } = building.userData;
+        const texture = previewTexture || (topMaterial ? topMaterial.map : null);
+
+        if (this.shouldUsePreviewCube(building, state) && texture) {
+            this.updatePreviewCube(building, texture);
+        } else {
+            this.removePreviewCube(building);
+        }
     }
 
     restoreBaseGeometry(building) {
@@ -770,9 +903,9 @@ class FileCity {
         }
 
         const data = building.userData;
-        const width = data.baseWidth || data.width || this.hexCubeSize;
-        const depth = data.baseDepth || data.depth || width;
-        const height = data.baseHeight || data.height || width;
+    const width = data.baseWidth || data.width || this.previewCubeMaxSize;
+    const depth = data.baseDepth || data.depth || width;
+    const height = data.baseHeight || data.height || width;
 
         if (!data.mesh || width <= 0 || depth <= 0 || height <= 0) {
             return;
@@ -1388,7 +1521,6 @@ class FileCity {
                 this.ensureBuildingGhost(building);
                 return;
             }
-            this.removeHexPreviewCube(building);
             this.restoreBaseGeometry(building);
             const { topMaterial } = building.userData;
             topMaterial.map = texture;
@@ -1396,6 +1528,8 @@ class FileCity {
             topMaterial.needsUpdate = true;
             this.setRimTexture(building, texture);
             building.userData.textureState = 'image';
+            building.userData.previewTexture = null;
+            this.refreshPreviewCube(building);
         }
 
         getFileExtension(filename) {
@@ -1452,12 +1586,8 @@ class FileCity {
                     this.mediaBuilding.userData.previousState = null;
                     this.mediaBuilding.userData.rimGeneratedTexture = null;
                     const restoredState = previousState || 'ghost';
-                    if (restoredState === 'loaded' && topMaterial && topMaterial.map) {
-                        this.ensureHexPreviewCube(this.mediaBuilding, topMaterial.map);
-                    } else {
-                        this.removeHexPreviewCube(this.mediaBuilding);
-                        this.restoreBaseGeometry(this.mediaBuilding);
-                    }
+                    this.restoreBaseGeometry(this.mediaBuilding);
+                    this.refreshPreviewCube(this.mediaBuilding, restoredState);
                 }
             }
 
@@ -1497,6 +1627,7 @@ class FileCity {
             building.userData.previousRimMap = rimMaterial ? rimMaterial.map : null;
             building.userData.previousState = building.userData.textureState;
             building.userData.textureState = 'video-pending';
+            this.refreshPreviewCube(building, 'video-pending');
 
             const applyVideoTexture = () => {
                 if (this.activeMedia !== 'video' || this.mediaBuilding !== building) {
@@ -1511,6 +1642,7 @@ class FileCity {
                 this.videoCanvasTexture.needsUpdate = true;
                 this.videoRimTexture.needsUpdate = true;
                 building.userData.textureState = 'video';
+                this.refreshPreviewCube(building, 'video');
             };
 
             const handleLoaded = () => {
