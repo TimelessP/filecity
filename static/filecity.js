@@ -158,7 +158,10 @@ class FileCity {
             }
         });
 
-        document.addEventListener('click', () => {
+        document.addEventListener('click', (event) => {
+            if (event.button !== 0) {
+                return;
+            }
             if (!this.isPointerLocked) {
                 this.requestPointerLock();
             }
@@ -166,6 +169,18 @@ class FileCity {
 
         document.addEventListener('pointerlockchange', () => {
             this.isPointerLocked = document.pointerLockElement === document.body;
+        });
+
+        document.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+        });
+
+        document.addEventListener('mousedown', (event) => {
+            if (event.button === 2) {
+                event.preventDefault();
+                event.stopPropagation();
+                this.focusPreviewUnderCrosshair();
+            }
         });
 
         document.addEventListener('mousemove', (event) => {
@@ -178,7 +193,10 @@ class FileCity {
             this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
         });
 
-        document.addEventListener('click', () => {
+        document.addEventListener('click', (event) => {
+            if (event.button !== 0) {
+                return;
+            }
             const building = this.getBuildingUnderCrosshair();
             if (!building) {
                 return;
@@ -837,6 +855,75 @@ class FileCity {
         });
     }
 
+    focusPreviewUnderCrosshair() {
+        const building = this.getBuildingUnderCrosshair();
+        if (!building || !building.userData || !building.userData.previewCube) {
+            return;
+        }
+        if (!this.isBuildingCurrent(building)) {
+            return;
+        }
+        this.focusCameraOnPreview(building);
+    }
+
+    focusCameraOnPreview(building) {
+        const data = building?.userData;
+        if (!data || !data.previewCube) {
+            return;
+        }
+
+        const cube = data.previewCube;
+        const cubeWorldPos = new THREE.Vector3();
+        cube.getWorldPosition(cubeWorldPos);
+
+        const directionToCamera = new THREE.Vector3().subVectors(this.camera.position, cubeWorldPos);
+        if (directionToCamera.lengthSq() < 1e-6) {
+            directionToCamera.set(0, 0, 1);
+        } else {
+            directionToCamera.normalize();
+        }
+
+        const absX = Math.abs(directionToCamera.x);
+        const absY = Math.abs(directionToCamera.y);
+        const absZ = Math.abs(directionToCamera.z);
+        const offsetDirection = new THREE.Vector3();
+
+        if (absX >= absY && absX >= absZ) {
+            offsetDirection.set(Math.sign(directionToCamera.x) || 1, 0, 0);
+        } else if (absY >= absX && absY >= absZ) {
+            offsetDirection.set(0, Math.sign(directionToCamera.y) || 1, 0);
+        } else {
+            offsetDirection.set(0, 0, Math.sign(directionToCamera.z) || 1);
+        }
+
+        const cubeSize = Math.max(0.5, Math.min(this.previewCubeMaxSize, data.height || this.previewCubeMaxSize));
+        const halfSize = cubeSize / 2;
+        const verticalFov = THREE.MathUtils.degToRad(this.camera.fov);
+        const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * this.camera.aspect);
+        const verticalDistance = halfSize / Math.tan(verticalFov / 2);
+        const horizontalDistance = halfSize / Math.tan(horizontalFov / 2);
+        const paddingFactor = 1.1;
+        const distance = Math.max(verticalDistance, horizontalDistance) * paddingFactor;
+
+        const targetPosition = cubeWorldPos.clone().add(offsetDirection.multiplyScalar(distance));
+        if (offsetDirection.y < 0 && targetPosition.y < 1) {
+            targetPosition.y = 1;
+        }
+
+        this.camera.position.copy(targetPosition);
+
+    const upVector = this.camera.up.clone();
+    const lookMatrix = new THREE.Matrix4().lookAt(targetPosition, cubeWorldPos, upVector);
+    const lookEuler = new THREE.Euler().setFromRotationMatrix(lookMatrix, 'YXZ');
+
+    this.pitch = THREE.MathUtils.clamp(lookEuler.x, -Math.PI / 2, Math.PI / 2);
+    this.yaw = lookEuler.y;
+    this.roll = 0;
+
+    const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(baseEuler);
+    }
+
     drawSourceToCanvas(source, canvas, ctx, options = {}) {
         const {
             background = 'rgba(0, 0, 0, 1)',
@@ -1081,15 +1168,15 @@ class FileCity {
 
         this.camera_velocity.set(0, 0, 0);
 
-    if (this.keys['KeyW']) this.camera_velocity.z += speed;
-    if (this.keys['KeyS']) this.camera_velocity.z -= speed;
+        if (this.keys['KeyW']) this.camera_velocity.z += speed;
+        if (this.keys['KeyS']) this.camera_velocity.z -= speed;
         if (this.keys['KeyA']) this.camera_velocity.x -= speed;
         if (this.keys['KeyD']) this.camera_velocity.x += speed;
         if (this.keys['Space']) this.camera_velocity.y += speed;
         if (this.keys['ControlLeft'] || this.keys['ControlRight']) this.camera_velocity.y -= speed;
 
-    if (this.keys['KeyQ']) this.roll -= rotationSpeed;
-    if (this.keys['KeyE']) this.roll += rotationSpeed;
+        if (this.keys['KeyQ']) this.roll -= rotationSpeed;
+        if (this.keys['KeyE']) this.roll += rotationSpeed;
 
         if (this.roll > Math.PI) this.roll -= Math.PI * 2;
         if (this.roll < -Math.PI) this.roll += Math.PI * 2;
