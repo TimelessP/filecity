@@ -62,6 +62,10 @@ class FileCity {
         this.gotoFeedback = null;
         this.modalActive = false;
     this.pointerLockBeforeModal = false;
+    this.pointerLockWanted = false;
+    this.pendingPointerLock = false;
+    this.windowBlurred = false;
+    this.suppressPointerLockResume = false;
         this.autopilot = null;
         this.lastCameraUpdate = performance.now();
 
@@ -161,6 +165,11 @@ class FileCity {
                 this.handleModalKeydown(event);
                 return;
             }
+            if (event.code === 'Escape' && this.isPointerLocked) {
+                this.suppressPointerLockResume = true;
+                this.pointerLockWanted = false;
+                return;
+            }
             if (event.code === 'KeyG') {
                 event.preventDefault();
                 this.openGoToModal();
@@ -242,6 +251,8 @@ class FileCity {
             }
             if (!this.isPointerLocked) {
                 this.requestPointerLock();
+                event.preventDefault();
+                event.stopPropagation();
             }
         });
 
@@ -249,9 +260,30 @@ class FileCity {
             const lockElement = document.pointerLockElement;
             const canvas = this.renderer?.domElement || null;
             this.isPointerLocked = lockElement === document.body || (canvas && lockElement === canvas);
-            if (!this.isPointerLocked) {
+            if (this.isPointerLocked) {
+                this.pointerLockWanted = true;
+                this.pendingPointerLock = false;
+                this.windowBlurred = false;
+                this.suppressPointerLockResume = false;
+            } else {
+                if (this.suppressPointerLockResume) {
+                    this.pendingPointerLock = false;
+                    this.suppressPointerLockResume = false;
+                } else {
+                    if (!document.hasFocus()) {
+                        this.windowBlurred = true;
+                    }
+                    if (document.visibilityState !== 'visible' || this.windowBlurred) {
+                        this.pointerLockWanted = true;
+                        this.pendingPointerLock = false;
+                    }
+                }
                 this.cancelRightClickHold();
             }
+        });
+
+        document.addEventListener('pointerlockerror', () => {
+            this.pendingPointerLock = false;
         });
 
         document.addEventListener('contextmenu', (event) => {
@@ -286,11 +318,32 @@ class FileCity {
         });
 
         window.addEventListener('blur', () => {
+            this.windowBlurred = true;
+            if (this.isPointerLocked) {
+                this.pointerLockWanted = true;
+                this.pendingPointerLock = false;
+            }
             this.cancelRightClickHold();
         });
 
+        window.addEventListener('focus', () => {
+            this.windowBlurred = false;
+            if (!this.modalActive && this.pointerLockWanted && !this.isPointerLocked && !this.pendingPointerLock) {
+                this.requestPointerLock();
+            }
+        });
+
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState !== 'visible') {
+            if (document.visibilityState === 'visible') {
+                this.windowBlurred = false;
+                if (!this.modalActive && this.pointerLockWanted && !this.isPointerLocked && !this.pendingPointerLock) {
+                    this.requestPointerLock();
+                }
+            } else {
+                if (this.isPointerLocked) {
+                    this.pointerLockWanted = true;
+                    this.pendingPointerLock = false;
+                }
                 this.cancelRightClickHold();
             }
         });
@@ -378,8 +431,18 @@ class FileCity {
 
     requestPointerLock() {
         const target = this.renderer?.domElement || document.body;
-        if (target && target.requestPointerLock) {
+        if (!target || typeof target.requestPointerLock !== 'function') {
+            return false;
+        }
+        try {
             target.requestPointerLock();
+            this.pointerLockWanted = true;
+            this.pendingPointerLock = true;
+            return true;
+        } catch (error) {
+            console.warn('FileCity: pointer lock request failed', error);
+            this.pendingPointerLock = false;
+            return false;
         }
     }
 
@@ -1695,11 +1758,7 @@ class FileCity {
             this.gotoInput.blur();
         }
         if (this.pointerLockBeforeModal && !this.isPointerLocked) {
-            try {
-                this.requestPointerLock();
-            } catch (error) {
-                console.warn('FileCity: pointer lock request failed after closing modal', error);
-            }
+            this.requestPointerLock();
         }
         this.pointerLockBeforeModal = false;
     }
