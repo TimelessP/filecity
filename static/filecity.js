@@ -1693,15 +1693,14 @@ class FileCity {
         if (!this.modalActive) {
             return;
         }
+        event.stopImmediatePropagation();
         if (event.code === 'Escape') {
             event.preventDefault();
-            event.stopPropagation();
             this.closeGoToModal();
             return;
         }
         if (event.code === 'Enter' || event.code === 'NumpadEnter') {
             event.preventDefault();
-            event.stopPropagation();
             this.executeGoToSearch();
             return;
         }
@@ -1712,6 +1711,7 @@ class FileCity {
         if (!this.modalActive) {
             return;
         }
+        event.stopImmediatePropagation();
         event.stopPropagation();
     }
 
@@ -1812,7 +1812,10 @@ class FileCity {
         }
         approachDirection.normalize();
 
-        const distance = Math.max(6, height * 1.6);
+    const spacing = Number.isFinite(this.gridSpacing) ? this.gridSpacing : 8;
+    const desiredDistance = Math.max(3.5, height * 1.35);
+    const spacingLimit = Math.max(3.6, spacing * 0.9);
+    const distance = Math.min(desiredDistance, spacingLimit);
         const targetPosition = buildingPos.clone().add(approachDirection.multiplyScalar(distance));
         targetPosition.y = Math.max(targetPosition.y, buildingPos.y + height * 0.75 + 2);
 
