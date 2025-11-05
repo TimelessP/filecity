@@ -55,20 +55,23 @@ class FileCity {
         this.searchMatches = [];
         this.searchIndex = -1;
         this.searchQuery = '';
-    this.sortModes = ['unsorted', 'name', 'date', 'size'];
-    this.sortModeIndex = 0;
-    this.sortAscending = true;
+        this.sortModes = ['unsorted', 'name', 'date', 'size'];
+        this.sortModeIndex = 0;
+        this.sortAscending = true;
+        this.hudCollapsed = false;
+        this.hudElement = null;
+        this.hudHintElement = null;
         this.gotoModal = null;
         this.gotoInput = null;
         this.gotoFindButton = null;
         this.gotoCancelButton = null;
         this.gotoFeedback = null;
         this.modalActive = false;
-    this.pointerLockBeforeModal = false;
-    this.pointerLockWanted = false;
-    this.pendingPointerLock = false;
-    this.windowBlurred = false;
-    this.suppressPointerLockResume = false;
+        this.pointerLockBeforeModal = false;
+        this.pointerLockWanted = false;
+        this.pendingPointerLock = false;
+        this.windowBlurred = false;
+        this.suppressPointerLockResume = false;
         this.autopilot = null;
         this.lastCameraUpdate = performance.now();
 
@@ -119,6 +122,7 @@ class FileCity {
 
         this.initControls();
         this.initGoToModal();
+        this.initHUDVisibility();
         this.updateLoadingProgress(50, "Loading neural interface...");
 
         this.initMedia();
@@ -136,7 +140,11 @@ class FileCity {
 
         setTimeout(() => {
             document.getElementById('loading').style.display = 'none';
-            document.getElementById('hud').style.display = 'block';
+            const hud = document.getElementById('hud');
+            if (hud) {
+                hud.style.display = 'block';
+                this.updateHUDVisibility();
+            }
         }, 1000);
     }
 
@@ -175,7 +183,11 @@ class FileCity {
             }
             if (event.code === 'Slash') {
                 event.preventDefault();
-                this.openGoToModal();
+                if (event.shiftKey) {
+                    this.toggleHUD();
+                } else {
+                    this.openGoToModal();
+                }
                 return;
             }
             if (event.code === 'KeyO') {
@@ -1940,6 +1952,39 @@ class FileCity {
             this.requestPointerLock();
         }
         this.pointerLockBeforeModal = false;
+    }
+
+    initHUDVisibility() {
+        this.hudElement = document.getElementById('hud');
+        this.hudHintElement = document.getElementById('hud-collapsed-hint');
+        if (this.hudHintElement) {
+            this.hudHintElement.setAttribute('title', 'Press ? to toggle help HUD');
+        }
+        this.hudCollapsed = false;
+        this.updateHUDVisibility();
+    }
+
+    toggleHUD(force) {
+        if (!this.hudElement) {
+            return;
+        }
+        if (typeof force === 'boolean') {
+            this.hudCollapsed = force;
+        } else {
+            this.hudCollapsed = !this.hudCollapsed;
+        }
+        this.updateHUDVisibility();
+    }
+
+    updateHUDVisibility() {
+        if (!this.hudElement) {
+            return;
+        }
+        if (this.hudCollapsed) {
+            this.hudElement.classList.add('collapsed');
+        } else {
+            this.hudElement.classList.remove('collapsed');
+        }
     }
 
     handleModalKeydown(event) {

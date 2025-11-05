@@ -106,6 +106,27 @@
             50% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
         }
 
+        #hud.collapsed #info-panel,
+        #hud.collapsed #controls-panel {
+            display: none;
+        }
+
+        #hud-collapsed-hint {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: #ff0080;
+            font-size: 24px;
+            font-weight: 900;
+            font-family: 'Orbitron', 'Courier New', monospace;
+            text-shadow: 0 0 12px rgba(255, 0, 128, 0.8);
+            display: none;
+        }
+
+        #hud.collapsed #hud-collapsed-hint {
+            display: block;
+        }
+
         #goto-modal {
             position: fixed;
             inset: 0;
@@ -306,9 +327,11 @@
             <div class="control-line">N / SHIFT+N → Cycle Go To Results</div>
             <div class="control-line">O → Cycle Sort (Name / Date / Size / Natural)</div>
             <div class="control-line">SHIFT+O → Reverse Sort Order</div>
+            <div class="control-line">? → Toggle Help HUD</div>
         </div>
         
         <div id="crosshair"></div>
+        <div id="hud-collapsed-hint">?</div>
     </div>
 
     <div id="goto-modal">
