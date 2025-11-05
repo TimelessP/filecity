@@ -87,7 +87,7 @@ class FileCity {
     this.lastFrameTime = performance.now();
 
         // Media/file type helpers
-        this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'apng', 'tif', 'tiff', 'ico']);
+    this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'apng', 'tif', 'tiff', 'ico']);
         this.audioExtensions = new Set(['mp3', 'ogg', 'oga', 'wav', 'aac', 'm4a', 'flac', 'opus', 'weba']);
         this.videoExtensions = new Set(['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'm4v']);
 
