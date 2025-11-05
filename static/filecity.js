@@ -761,6 +761,7 @@ class FileCity {
         });
         const mesh = new THREE.Mesh(geometry, fillMaterial);
         mesh.position.y = height / 2;
+        mesh.userData.isBuildingBody = true;
 
         const edgeMaterial = new THREE.LineBasicMaterial({
             color: this.getEdgeColor(file),
@@ -2241,7 +2242,12 @@ class FileCity {
             return null;
         }
 
-        let node = intersects[0].object;
+        let intersect = intersects.find((hit) => hit.object?.userData?.isBuildingBody);
+        if (!intersect) {
+            intersect = intersects[0];
+        }
+
+        let node = intersect.object;
         while (node && !node.userData.fileInfo) {
             node = node.parent;
         }
