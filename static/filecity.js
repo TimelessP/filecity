@@ -61,10 +61,11 @@ class FileCity {
         this.hudCollapsed = false;
         this.hudElement = null;
         this.hudHintElement = null;
-    this.statusElement = null;
-    this.currentStatusText = '';
-    this.previousMediaActive = false;
-    this.lastStatusUpdate = 0;
+        this.statusElement = null;
+        this.currentStatusText = '';
+        this.previousMediaActive = false;
+        this.lastStatusUpdate = 0;
+        this.justRequestedPointerLock = false;
         this.gotoModal = null;
         this.gotoInput = null;
         this.gotoFindButton = null;
@@ -281,6 +282,7 @@ class FileCity {
                 this.requestPointerLock();
                 event.preventDefault();
                 event.stopPropagation();
+                this.justRequestedPointerLock = true;
             }
         });
 
@@ -294,6 +296,7 @@ class FileCity {
                 this.windowBlurred = false;
                 this.suppressPointerLockResume = false;
             } else {
+                this.justRequestedPointerLock = false;
                 if (this.suppressPointerLockResume) {
                     this.pendingPointerLock = false;
                     this.suppressPointerLockResume = false;
@@ -312,6 +315,7 @@ class FileCity {
         });
 
         document.addEventListener('pointerlockerror', () => {
+            this.justRequestedPointerLock = false;
             this.pendingPointerLock = false;
             this.updatePointerCursor();
         });
@@ -415,6 +419,10 @@ class FileCity {
                 return;
             }
             if (this.modalActive) {
+                return;
+            }
+            if (this.justRequestedPointerLock) {
+                this.justRequestedPointerLock = false;
                 return;
             }
             const building = this.getBuildingUnderCrosshair();
