@@ -104,6 +104,119 @@
             0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
             50% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
         }
+
+        #goto-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            z-index: 1500;
+        }
+
+        #goto-modal.visible {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+            cursor: auto;
+        }
+
+        #goto-modal.visible input {
+            cursor: text;
+        }
+
+        #goto-modal.visible button {
+            cursor: pointer;
+        }
+
+        .goto-dialog {
+            background: rgba(0, 0, 0, 0.9);
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.3);
+            border-radius: 10px;
+            padding: 24px;
+            width: min(440px, 90%);
+            pointer-events: auto;
+            text-align: left;
+        }
+
+        .goto-dialog h2 {
+            color: #ff0080;
+            font-size: 22px;
+            margin-bottom: 12px;
+            text-shadow: 0 0 12px rgba(255, 0, 128, 0.8);
+        }
+
+        .goto-dialog label {
+            display: block;
+            font-size: 12px;
+            color: #00ffff;
+            margin-bottom: 8px;
+        }
+
+        .goto-dialog input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #00ffff;
+            border-radius: 6px;
+            background: rgba(0, 10, 20, 0.9);
+            color: #00ff00;
+            font-family: 'Orbitron', 'Courier New', monospace;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .goto-dialog input:focus {
+            border-color: #ff0080;
+            box-shadow: 0 0 12px rgba(255, 0, 128, 0.4);
+        }
+
+        .goto-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .goto-actions button {
+            padding: 8px 18px;
+            border: 2px solid #00ffff;
+            border-radius: 6px;
+            background: rgba(0, 10, 20, 0.9);
+            color: #00ffff;
+            font-family: 'Orbitron', 'Courier New', monospace;
+            letter-spacing: 1px;
+            font-size: 12px;
+            text-transform: uppercase;
+            transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+        }
+
+        .goto-actions button.primary {
+            border-color: #ff0080;
+            color: #ff0080;
+        }
+
+        .goto-actions button:hover {
+            background: rgba(0, 255, 255, 0.15);
+        }
+
+        .goto-actions button.primary:hover {
+            background: rgba(255, 0, 128, 0.2);
+        }
+
+        #goto-feedback {
+            margin-top: 12px;
+            font-size: 11px;
+            color: #ffff00;
+            min-height: 14px;
+            text-shadow: 0 0 8px rgba(255, 255, 0, 0.6);
+        }
         
         #loading {
             position: absolute;
@@ -188,9 +301,26 @@
             <div class="control-line">V → Toggle Hidden Files (Stops Media)</div>
             <div class="control-line">. → Cycle Preview Detail</div>
             <div class="control-line">[ / ] → Skip Media ±10s (Hold SHIFT for ±60s)</div>
+            <div class="control-line">G → Open Go To Modal</div>
+            <div class="control-line">N / SHIFT+N → Cycle Go To Results</div>
         </div>
         
         <div id="crosshair"></div>
+    </div>
+
+    <div id="goto-modal">
+        <div class="goto-dialog">
+            <form id="goto-form">
+                <h2>Cybernav Go To</h2>
+                <label for="goto-input">Search file or directory name</label>
+                <input id="goto-input" type="text" autocomplete="off" spellcheck="false" placeholder="Start typing a name...">
+                <div id="goto-feedback"></div>
+                <div class="goto-actions">
+                    <button type="button" id="goto-cancel">Cancel</button>
+                    <button type="submit" class="primary" id="goto-find">Lock On</button>
+                </div>
+            </form>
+        </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>

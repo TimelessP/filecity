@@ -44,12 +44,25 @@ class FileCity {
         this.defaultViewState = null;
         this.pendingStackPushPath = null;
 
-    // Grid layout
-    this.gridColumns = 8;
-    this.gridSpacing = 8;
-    this.pavementGeometry = null;
-    this.pavementMaterial = null;
-    this.pavementTexture = null;
+        // Grid layout
+        this.gridColumns = 8;
+        this.gridSpacing = 8;
+        this.pavementGeometry = null;
+        this.pavementMaterial = null;
+        this.pavementTexture = null;
+
+        // Search and navigation
+        this.searchMatches = [];
+        this.searchIndex = -1;
+        this.searchQuery = '';
+        this.gotoModal = null;
+        this.gotoInput = null;
+        this.gotoFindButton = null;
+        this.gotoCancelButton = null;
+        this.gotoFeedback = null;
+        this.modalActive = false;
+        this.autopilot = null;
+        this.lastCameraUpdate = performance.now();
 
         // Media/file type helpers
         this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'apng', 'tif', 'tiff', 'ico']);
@@ -97,6 +110,7 @@ class FileCity {
         this.updateLoadingProgress(30, "Setting up cybernet protocols...");
 
         this.initControls();
+        this.initGoToModal();
         this.updateLoadingProgress(50, "Loading neural interface...");
 
         this.initMedia();
@@ -142,13 +156,34 @@ class FileCity {
 
     initControls() {
         document.addEventListener('keydown', (event) => {
+            if (this.modalActive) {
+                this.handleModalKeydown(event);
+                return;
+            }
+            if (event.code === 'KeyG') {
+                event.preventDefault();
+                this.openGoToModal();
+                return;
+            }
+            if (event.code === 'KeyN') {
+                event.preventDefault();
+                this.stepSearchResult(event.shiftKey ? -1 : 1);
+                return;
+            }
             this.keys[event.code] = true;
         });
         document.addEventListener('keyup', (event) => {
+            if (this.modalActive) {
+                this.handleModalKeyup(event);
+                return;
+            }
             this.keys[event.code] = false;
         });
 
         document.addEventListener('keydown', (event) => {
+            if (this.modalActive) {
+                return;
+            }
             if (event.code === 'Backspace' || event.code === 'KeyU') {
                 event.preventDefault();
                 this.goToParentDirectory();
@@ -201,6 +236,9 @@ class FileCity {
             if (event.button !== 0) {
                 return;
             }
+            if (this.modalActive) {
+                return;
+            }
             if (!this.isPointerLocked) {
                 this.requestPointerLock();
             }
@@ -219,6 +257,9 @@ class FileCity {
         });
 
         document.addEventListener('mousedown', (event) => {
+            if (this.modalActive) {
+                return;
+            }
             if (event.button === 2) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -231,6 +272,9 @@ class FileCity {
         });
 
         document.addEventListener('mouseup', (event) => {
+            if (this.modalActive) {
+                return;
+            }
             if (event.button === 2) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -249,6 +293,9 @@ class FileCity {
         });
 
         document.addEventListener('mousemove', (event) => {
+            if (this.modalActive) {
+                return;
+            }
             if (!this.isPointerLocked) {
                 return;
             }
@@ -263,6 +310,9 @@ class FileCity {
         });
 
         document.addEventListener('wheel', (event) => {
+            if (this.modalActive) {
+                return;
+            }
             if (!this.camera) {
                 return;
             }
@@ -276,6 +326,9 @@ class FileCity {
 
         document.addEventListener('click', (event) => {
             if (event.button !== 0) {
+                return;
+            }
+            if (this.modalActive) {
                 return;
             }
             const building = this.getBuildingUnderCrosshair();
@@ -510,6 +563,7 @@ class FileCity {
         this.fileData = this.showHidden ? [...this.allFiles] : this.allFiles.filter(file => !file.name.startsWith('.'));
         document.getElementById('entity-count').textContent = this.fileData.length;
 
+        this.resetSearchState();
         this.clearBuildings();
         this.createBuildings();
         this.forcePreviewRefresh();
@@ -1564,6 +1618,300 @@ class FileCity {
         }
     }
 
+    initGoToModal() {
+        this.gotoModal = document.getElementById('goto-modal');
+        if (!this.gotoModal) {
+            return;
+        }
+        this.gotoInput = document.getElementById('goto-input');
+        this.gotoFindButton = document.getElementById('goto-find');
+        this.gotoCancelButton = document.getElementById('goto-cancel');
+        this.gotoFeedback = document.getElementById('goto-feedback');
+        const form = document.getElementById('goto-form');
+
+        if (form) {
+            form.addEventListener('submit', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.executeGoToSearch();
+            });
+        }
+        if (this.gotoFindButton) {
+            this.gotoFindButton.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.executeGoToSearch();
+            });
+        }
+        if (this.gotoCancelButton) {
+            this.gotoCancelButton.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.closeGoToModal();
+            });
+        }
+        this.gotoModal.addEventListener('click', (event) => {
+            if (event.target === this.gotoModal) {
+                this.closeGoToModal();
+            }
+        });
+    }
+
+    openGoToModal() {
+        if (!this.gotoModal || this.modalActive) {
+            return;
+        }
+        this.autopilot = null;
+        this.modalActive = true;
+        this.gotoModal.classList.add('visible');
+        if (this.gotoFeedback) {
+            this.gotoFeedback.textContent = '';
+        }
+        if (this.gotoInput) {
+            this.gotoInput.value = this.searchQuery ? this.searchQuery : '';
+            this.gotoInput.focus();
+            this.gotoInput.select();
+        }
+        if (this.isPointerLocked) {
+            document.exitPointerLock();
+        }
+        this.releaseMovementKeys();
+    }
+
+    closeGoToModal() {
+        if (!this.gotoModal) {
+            return;
+        }
+        this.modalActive = false;
+        this.gotoModal.classList.remove('visible');
+        if (this.gotoInput) {
+            this.gotoInput.blur();
+        }
+    }
+
+    handleModalKeydown(event) {
+        if (!this.modalActive) {
+            return;
+        }
+        if (event.code === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            this.closeGoToModal();
+            return;
+        }
+        if (event.code === 'Enter' || event.code === 'NumpadEnter') {
+            event.preventDefault();
+            event.stopPropagation();
+            this.executeGoToSearch();
+            return;
+        }
+        event.stopPropagation();
+    }
+
+    handleModalKeyup(event) {
+        if (!this.modalActive) {
+            return;
+        }
+        event.stopPropagation();
+    }
+
+    executeGoToSearch() {
+        if (!this.gotoInput) {
+            return;
+        }
+        const query = this.gotoInput.value.trim();
+        if (!query.length) {
+            this.updateGoToFeedback('Enter a search term.');
+            return;
+        }
+
+        const lower = query.toLowerCase();
+        const matches = [];
+        this.buildings.forEach((building) => {
+            const fileInfo = building?.userData?.fileInfo;
+            if (!fileInfo || !fileInfo.name) {
+                return;
+            }
+            if (fileInfo.name.toLowerCase().includes(lower)) {
+                matches.push(building);
+            }
+        });
+
+        if (!matches.length) {
+            this.searchMatches = [];
+            this.searchIndex = -1;
+            this.searchQuery = query;
+            this.updateGoToFeedback('No matches found.');
+            return;
+        }
+
+        this.searchMatches = matches;
+        this.searchIndex = 0;
+        this.searchQuery = query;
+        this.closeGoToModal();
+        this.flyCameraToBuilding(matches[0]);
+    }
+
+    stepSearchResult(direction = 1) {
+        if (!this.searchMatches || !this.searchMatches.length) {
+            return;
+        }
+
+        this.searchMatches = this.searchMatches.filter((building) => this.isBuildingCurrent(building));
+        if (!this.searchMatches.length) {
+            this.resetSearchState();
+            return;
+        }
+
+        const total = this.searchMatches.length;
+        if (this.searchIndex < 0) {
+            this.searchIndex = direction > 0 ? 0 : total - 1;
+        } else {
+            this.searchIndex = (this.searchIndex + direction + total) % total;
+        }
+
+        const building = this.searchMatches[this.searchIndex];
+        this.flyCameraToBuilding(building);
+    }
+
+    updateGoToFeedback(message) {
+        if (this.gotoFeedback) {
+            this.gotoFeedback.textContent = message ?? '';
+        }
+    }
+
+    resetSearchState() {
+        this.searchMatches = [];
+        this.searchIndex = -1;
+        if (!this.modalActive && this.gotoFeedback) {
+            this.gotoFeedback.textContent = '';
+        }
+        this.searchQuery = '';
+    }
+
+    releaseMovementKeys() {
+        ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'KeyQ', 'KeyE'].forEach((code) => {
+            this.keys[code] = false;
+        });
+    }
+
+    flyCameraToBuilding(building) {
+        if (!building || !this.isBuildingCurrent(building)) {
+            return;
+        }
+
+        const buildingPos = new THREE.Vector3();
+        building.getWorldPosition(buildingPos);
+        const data = building.userData || {};
+        const height = data.height ?? 3;
+
+        const lookHeight = height * 0.6;
+        const approachDirection = new THREE.Vector3().subVectors(this.camera.position, buildingPos);
+        if (approachDirection.lengthSq() < 1e-6) {
+            approachDirection.set(0, 0, 1);
+        }
+        approachDirection.normalize();
+
+        const distance = Math.max(6, height * 1.6);
+        const targetPosition = buildingPos.clone().add(approachDirection.multiplyScalar(distance));
+        targetPosition.y = Math.max(targetPosition.y, buildingPos.y + height * 0.75 + 2);
+
+        this.camera_velocity.set(0, 0, 0);
+        this.autopilot = {
+            targetBuilding: building,
+            targetPosition,
+            lookHeight,
+            currentSpeed: 0,
+            maxSpeed: 0.8,
+            accel: 0.03,
+            speedByDistance: 0.25,
+            turnRate: 0.18,
+            tolerance: 0.35
+        };
+    }
+
+    updateAutopilot(delta) {
+        if (!this.autopilot) {
+            return;
+        }
+        const state = this.autopilot;
+        if (!this.isBuildingCurrent(state.targetBuilding)) {
+            this.autopilot = null;
+            return;
+        }
+
+        const toTarget = new THREE.Vector3().subVectors(state.targetPosition, this.camera.position);
+        const distance = toTarget.length();
+        if (!Number.isFinite(distance)) {
+            this.autopilot = null;
+            return;
+        }
+
+        if (distance < state.tolerance) {
+            this.camera.position.copy(state.targetPosition);
+            this.finishAutopilot();
+            return;
+        }
+
+        const direction = toTarget.normalize();
+        const accel = state.accel * (delta / 0.016);
+        const desiredSpeed = Math.min(state.maxSpeed, Math.max(0.12, distance * state.speedByDistance));
+        let currentSpeed = state.currentSpeed || 0;
+        if (currentSpeed < desiredSpeed) {
+            currentSpeed = Math.min(desiredSpeed, currentSpeed + accel);
+        } else {
+            currentSpeed = Math.max(desiredSpeed, currentSpeed - accel * 1.6);
+        }
+        if (distance < currentSpeed) {
+            currentSpeed = distance * 0.9;
+        }
+        state.currentSpeed = currentSpeed;
+        this.camera.position.addScaledVector(direction, currentSpeed);
+
+        const lookTarget = new THREE.Vector3();
+        state.targetBuilding.getWorldPosition(lookTarget);
+        lookTarget.y += state.lookHeight;
+        const lookMatrix = new THREE.Matrix4().lookAt(this.camera.position.clone(), lookTarget, new THREE.Vector3(0, 1, 0));
+        const desiredQuaternion = new THREE.Quaternion().setFromRotationMatrix(lookMatrix);
+
+        const turnStep = Math.min(1, state.turnRate * (delta / 0.016));
+        this.camera.quaternion.slerp(desiredQuaternion, turnStep);
+
+        const euler = new THREE.Euler().setFromQuaternion(this.camera.quaternion, 'YXZ');
+        this.pitch = THREE.MathUtils.clamp(euler.x, -Math.PI / 2, Math.PI / 2);
+        this.yaw = euler.y;
+        this.roll = 0;
+
+        const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
+        this.camera.quaternion.setFromEuler(baseEuler);
+    }
+
+    finishAutopilot() {
+        const state = this.autopilot;
+        if (!state) {
+            return;
+        }
+
+        const lookTarget = new THREE.Vector3();
+        if (state.targetBuilding && this.isBuildingCurrent(state.targetBuilding)) {
+            state.targetBuilding.getWorldPosition(lookTarget);
+            lookTarget.y += state.lookHeight;
+        } else {
+            lookTarget.copy(state.targetPosition.clone().add(new THREE.Vector3(0, 0, -1)));
+        }
+
+        const lookMatrix = new THREE.Matrix4().lookAt(this.camera.position.clone(), lookTarget, new THREE.Vector3(0, 1, 0));
+        this.camera.quaternion.setFromRotationMatrix(lookMatrix);
+        const euler = new THREE.Euler().setFromQuaternion(this.camera.quaternion, 'YXZ');
+        this.pitch = THREE.MathUtils.clamp(euler.x, -Math.PI / 2, Math.PI / 2);
+        this.yaw = euler.y;
+        this.roll = 0;
+        const baseEuler = new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ');
+        this.camera.quaternion.setFromEuler(baseEuler);
+        this.autopilot = null;
+        this.camera_velocity.set(0, 0, 0);
+    }
+
     skipActiveMedia(offsetSeconds) {
         if (!this.activeMedia || !offsetSeconds) {
             return;
@@ -1723,6 +2071,20 @@ class FileCity {
     }
 
     updateCamera() {
+        if (this.autopilot && (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'] || this.keys['Space'] || this.keys['ControlLeft'] || this.keys['ControlRight'])) {
+            this.autopilot = null;
+        }
+
+        const now = performance.now();
+        if (this.autopilot) {
+            const delta = Math.min(0.05, (now - this.lastCameraUpdate) / 1000);
+            this.lastCameraUpdate = now;
+            this.updateAutopilot(delta || 0.016);
+            this.updateDisplayedCoordinates();
+            return;
+        }
+        this.lastCameraUpdate = now;
+
         const baseSpeed = 0.125;
         const baseRotationSpeed = 0.005;
         const isSlow = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
