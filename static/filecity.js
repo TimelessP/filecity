@@ -308,10 +308,12 @@ class FileCity {
                 }
                 this.cancelRightClickHold();
             }
+            this.updatePointerCursor();
         });
 
         document.addEventListener('pointerlockerror', () => {
             this.pendingPointerLock = false;
+            this.updatePointerCursor();
         });
 
         document.addEventListener('contextmenu', (event) => {
@@ -466,10 +468,12 @@ class FileCity {
             target.requestPointerLock();
             this.pointerLockWanted = true;
             this.pendingPointerLock = true;
+            this.updatePointerCursor();
             return true;
         } catch (error) {
             console.warn('FileCity: pointer lock request failed', error);
             this.pendingPointerLock = false;
+            this.updatePointerCursor();
             return false;
         }
     }
@@ -2016,6 +2020,7 @@ class FileCity {
             document.exitPointerLock();
         }
         this.releaseMovementKeys();
+        this.updatePointerCursor();
     }
 
     closeGoToModal() {
@@ -2031,6 +2036,7 @@ class FileCity {
             this.requestPointerLock();
         }
         this.pointerLockBeforeModal = false;
+        this.updatePointerCursor();
     }
 
     initHUDVisibility() {
@@ -2043,6 +2049,7 @@ class FileCity {
         this.hudCollapsed = false;
         this.updateHUDVisibility();
         this.updateStatusDisplay(true);
+        this.updatePointerCursor();
     }
 
     toggleHUD(force) {
@@ -2065,6 +2072,18 @@ class FileCity {
             this.hudElement.classList.add('collapsed');
         } else {
             this.hudElement.classList.remove('collapsed');
+        }
+        this.updatePointerCursor();
+    }
+
+    updatePointerCursor() {
+        if (!document?.body) {
+            return;
+        }
+        if (!this.isPointerLocked || this.modalActive) {
+            document.body.classList.add('pointer-visible');
+        } else {
+            document.body.classList.remove('pointer-visible');
         }
     }
 
