@@ -641,6 +641,11 @@ class FileCity {
             return;
         }
 
+        const mediaContext = this.captureActiveMediaContext();
+        if (mediaContext) {
+            this.mediaBuilding = null;
+        }
+
         const baseList = this.showHidden ? [...this.allFiles] : this.allFiles.filter(file => !file.name.startsWith('.'));
         const sortedList = this.applyCurrentSort(baseList);
         this.fileData = sortedList;
@@ -651,6 +656,7 @@ class FileCity {
         this.updateSortStatus();
         this.clearBuildings();
         this.createBuildings();
+        this.restoreActiveMedia(mediaContext);
         this.forcePreviewRefresh();
     }
 
@@ -742,6 +748,72 @@ class FileCity {
             return;
         }
         element.textContent = `ONLINE · Sort: ${this.describeSortMode()}`;
+    }
+
+    captureActiveMediaContext() {
+        if (!this.activeMedia || !this.mediaBuilding || !this.mediaBuilding.userData?.fileInfo) {
+            return null;
+        }
+        const path = this.mediaBuilding.userData.fileInfo.path;
+        if (!path) {
+            return null;
+        }
+        const context = {
+            type: this.activeMedia,
+            path,
+            paused: false
+        };
+        if (this.activeMedia === 'audio' && this.audioElement) {
+            context.paused = this.audioElement.paused;
+        } else if (this.activeMedia === 'video' && this.videoElement) {
+            context.paused = this.videoElement.paused;
+        }
+        return context;
+    }
+
+    restoreActiveMedia(context) {
+        if (!context) {
+            return;
+        }
+        const building = this.buildings.find((candidate) => candidate?.userData?.fileInfo?.path === context.path);
+        if (!building) {
+            this.stopMedia();
+            return;
+        }
+
+        this.mediaBuilding = building;
+        const data = building.userData;
+        data.currentMedia = context.type;
+
+        if (context.type === 'audio') {
+            data.previewMode = data.previewMode === 'video' ? null : data.previewMode;
+            this.setBuildingMediaState(building, true, context.paused);
+            if (this.audioElement) {
+                if (context.paused) {
+                    this.audioElement.pause();
+                } else {
+                    this.audioElement.play().catch(() => {});
+                }
+            }
+            this.activeMedia = 'audio';
+            return;
+        }
+
+        if (context.type === 'video') {
+            data.previewMode = 'video';
+            this.setBuildingMediaState(building, true, context.paused);
+            this.ensurePreviewForBuilding(building);
+            if (this.videoElement) {
+                if (context.paused) {
+                    this.videoElement.pause();
+                } else {
+                    this.videoElement.play().catch(() => {});
+                }
+            }
+            this.activeMedia = 'video';
+            this.updateVideoFrame(true);
+            return;
+        }
     }
 
     async loadFavourites() {
