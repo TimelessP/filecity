@@ -61,6 +61,10 @@ class FileCity {
         this.hudCollapsed = false;
         this.hudElement = null;
         this.hudHintElement = null;
+    this.statusElement = null;
+    this.currentStatusText = '';
+    this.previousMediaActive = false;
+    this.lastStatusUpdate = 0;
         this.gotoModal = null;
         this.gotoInput = null;
         this.gotoFindButton = null;
@@ -670,6 +674,7 @@ class FileCity {
         this.createBuildings();
         this.restoreActiveMedia(mediaContext);
         this.forcePreviewRefresh();
+        this.updateStatusDisplay(true);
     }
 
     getCurrentSortMode() {
@@ -755,11 +760,77 @@ class FileCity {
     }
 
     updateSortStatus() {
-        const element = document.getElementById('status');
+        this.updateStatusDisplay(true);
+    }
+
+    buildMediaStatus() {
+        if (!this.activeMedia || !this.mediaBuilding || !this.mediaBuilding.userData?.fileInfo) {
+            return '';
+        }
+
+        const fileInfo = this.mediaBuilding.userData.fileInfo;
+        const element = this.activeMedia === 'audio' ? this.audioElement : this.videoElement;
         if (!element) {
+            return `${this.activeMedia === 'video' ? 'Video' : 'Audio'}: ${fileInfo.name}`;
+        }
+
+        const state = element.paused ? 'Paused' : 'Playing';
+        const current = Number.isFinite(element.currentTime) ? element.currentTime : 0;
+        const hasDuration = Number.isFinite(element.duration) && element.duration > 0;
+        const duration = hasDuration ? element.duration : null;
+        const currentText = this.formatMediaTime(current);
+        const durationText = duration !== null ? this.formatMediaTime(duration) : null;
+        const timeSegment = durationText ? `${currentText} / ${durationText}` : currentText;
+        return `${state}: ${fileInfo.name} (${timeSegment})`;
+    }
+
+    formatMediaTime(seconds) {
+        let value = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+        value = Math.floor(value);
+        const hrs = Math.floor(value / 3600);
+        const mins = Math.floor((value % 3600) / 60);
+        const secs = value % 60;
+        const pad = (num) => num.toString().padStart(2, '0');
+        if (hrs > 0) {
+            return `${hrs}:${pad(mins)}:${pad(secs)}`;
+        }
+        return `${mins}:${pad(secs)}`;
+    }
+
+    updateStatusDisplay(force = false) {
+        if (!this.statusElement) {
             return;
         }
-        element.textContent = `ONLINE · Sort: ${this.describeSortMode()}`;
+
+        const base = `ONLINE · Sort: ${this.describeSortMode()}`;
+        const mediaStatus = this.buildMediaStatus();
+        const text = mediaStatus ? `${base} · ${mediaStatus}` : base;
+
+        if (force || this.currentStatusText !== text) {
+            this.statusElement.textContent = text;
+            this.currentStatusText = text;
+            this.lastStatusUpdate = performance.now();
+        }
+    }
+
+    refreshStatusTicker() {
+        const mediaActive = !!this.activeMedia;
+        if (!this.statusElement) {
+            this.previousMediaActive = mediaActive;
+            return;
+        }
+
+        const now = performance.now();
+        if (mediaActive) {
+            if (now - this.lastStatusUpdate > 250) {
+                this.updateStatusDisplay(true);
+                this.lastStatusUpdate = now;
+            }
+        } else if (this.previousMediaActive) {
+            this.updateStatusDisplay(true);
+        }
+
+        this.previousMediaActive = mediaActive;
     }
 
     captureActiveMediaContext() {
@@ -808,6 +879,7 @@ class FileCity {
                 }
             }
             this.activeMedia = 'audio';
+            this.updateStatusDisplay(true);
             return;
         }
 
@@ -824,8 +896,11 @@ class FileCity {
             }
             this.activeMedia = 'video';
             this.updateVideoFrame(true);
+            this.updateStatusDisplay(true);
             return;
         }
+
+        this.updateStatusDisplay(true);
     }
 
     async loadFavourites() {
@@ -1722,6 +1797,7 @@ class FileCity {
         this.activeMedia = 'audio';
         this.mediaBuilding = building;
     this.setBuildingMediaState(building, true, false);
+        this.updateStatusDisplay(true);
     }
 
     playVideo(building) {
@@ -1744,6 +1820,7 @@ class FileCity {
             this.setBuildingMediaState(building, true, false);
             this.ensurePreviewForBuilding(building);
             this.updateVideoFrame(true);
+            this.updateStatusDisplay(true);
         };
 
         const handleLoaded = () => {
@@ -1761,6 +1838,7 @@ class FileCity {
             building.userData.previewMode = null;
             this.setBuildingMediaState(building, false);
             this.ensurePreviewForBuilding(building);
+            this.updateStatusDisplay(true);
         };
 
         this.pendingVideoHandlers = { loaded: handleLoaded, error: handleError };
@@ -1825,6 +1903,7 @@ class FileCity {
 
         this.activeMedia = null;
         this.mediaBuilding = null;
+        this.updateStatusDisplay(true);
     }
 
     setBuildingMediaState(building, isActive, isPaused = false) {
@@ -1957,11 +2036,13 @@ class FileCity {
     initHUDVisibility() {
         this.hudElement = document.getElementById('hud');
         this.hudHintElement = document.getElementById('hud-collapsed-hint');
+        this.statusElement = document.getElementById('status');
         if (this.hudHintElement) {
             this.hudHintElement.setAttribute('title', 'Press ? to toggle help HUD');
         }
         this.hudCollapsed = false;
         this.updateHUDVisibility();
+        this.updateStatusDisplay(true);
     }
 
     toggleHUD(force) {
@@ -2261,6 +2342,7 @@ class FileCity {
                     this.setBuildingMediaState(building, true, true);
                 }
             }
+            this.updateStatusDisplay(true);
             return;
         }
 
@@ -2277,6 +2359,7 @@ class FileCity {
                 }
                 this.updateVideoFrame(true);
             }
+            this.updateStatusDisplay(true);
         }
     }
 
@@ -2367,6 +2450,7 @@ class FileCity {
         this.updateBuildingPreviews();
         this.updateMediaHighlights();
         this.updateVideoFrame();
+        this.refreshStatusTicker();
 
         this.renderer.render(this.scene, this.camera);
     }
