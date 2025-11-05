@@ -1800,11 +1800,13 @@ class FileCity {
                 map: texture,
                 transparent: true,
                 opacity: 1,
-                toneMapped: false
+                toneMapped: false,
+                depthWrite: false,
+                depthTest: false
             });
             cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
             cube.position.set(0, topY, 0);
-            cube.renderOrder = 5;
+            cube.renderOrder = 50;
             building.add(cube);
             data.previewCube = cube;
         } else {
@@ -1815,12 +1817,21 @@ class FileCity {
             cube.position.set(0, topY, 0);
             const applyMaterial = (material) => {
                 if (!material) {
-                    return new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 1, toneMapped: false });
+                    return new THREE.MeshBasicMaterial({
+                        map: texture,
+                        transparent: true,
+                        opacity: 1,
+                        toneMapped: false,
+                        depthWrite: false,
+                        depthTest: false
+                    });
                 }
                 material.map = texture;
                 material.opacity = 1;
                 material.transparent = true;
                 material.toneMapped = false;
+                material.depthWrite = false;
+                material.depthTest = false;
                 material.needsUpdate = true;
                 return material;
             };
