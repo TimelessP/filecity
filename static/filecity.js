@@ -55,6 +55,9 @@ class FileCity {
         this.searchMatches = [];
         this.searchIndex = -1;
         this.searchQuery = '';
+    this.sortModes = ['unsorted', 'name', 'date', 'size'];
+    this.sortModeIndex = 0;
+    this.sortAscending = true;
         this.gotoModal = null;
         this.gotoInput = null;
         this.gotoFindButton = null;
@@ -170,9 +173,18 @@ class FileCity {
                 this.pointerLockWanted = false;
                 return;
             }
-            if (event.code === 'KeyG') {
+            if (event.code === 'Slash') {
                 event.preventDefault();
                 this.openGoToModal();
+                return;
+            }
+            if (event.code === 'KeyO') {
+                event.preventDefault();
+                if (event.shiftKey) {
+                    this.toggleSortDirection();
+                } else {
+                    this.cycleSortMode();
+                }
                 return;
             }
             if (event.code === 'KeyN') {
@@ -629,13 +641,107 @@ class FileCity {
             return;
         }
 
-        this.fileData = this.showHidden ? [...this.allFiles] : this.allFiles.filter(file => !file.name.startsWith('.'));
+        const baseList = this.showHidden ? [...this.allFiles] : this.allFiles.filter(file => !file.name.startsWith('.'));
+        const sortedList = this.applyCurrentSort(baseList);
+        this.fileData = sortedList;
         document.getElementById('entity-count').textContent = this.fileData.length;
 
         this.resetSearchState();
+        this.autopilot = null;
+        this.updateSortStatus();
         this.clearBuildings();
         this.createBuildings();
         this.forcePreviewRefresh();
+    }
+
+    getCurrentSortMode() {
+        return this.sortModes[this.sortModeIndex] ?? 'unsorted';
+    }
+
+    applyCurrentSort(files) {
+        if (!Array.isArray(files) || !files.length) {
+            return [];
+        }
+        const mode = this.getCurrentSortMode();
+        const list = [...files];
+        if (mode === 'unsorted') {
+            if (!this.sortAscending) {
+                list.reverse();
+            }
+            return list;
+        }
+
+        const direction = this.sortAscending ? 1 : -1;
+        const compareByName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.name.localeCompare(b.name);
+
+        if (mode === 'name') {
+            list.sort((a, b) => compareByName(a, b) * direction);
+            return list;
+        }
+
+        if (mode === 'date') {
+            list.sort((a, b) => {
+                const diff = (a.modified ?? 0) - (b.modified ?? 0);
+                if (diff !== 0) {
+                    return diff * direction;
+                }
+                return compareByName(a, b);
+            });
+            return list;
+        }
+
+        if (mode === 'size') {
+            list.sort((a, b) => {
+                const aSize = a.is_directory ? -1 : (a.size ?? 0);
+                const bSize = b.is_directory ? -1 : (b.size ?? 0);
+                const diff = aSize - bSize;
+                if (diff !== 0) {
+                    return diff * direction;
+                }
+                return compareByName(a, b);
+            });
+            return list;
+        }
+
+        return list;
+    }
+
+    cycleSortMode() {
+        this.sortModeIndex = (this.sortModeIndex + 1) % this.sortModes.length;
+        const mode = this.getCurrentSortMode();
+        if (mode === 'name' || mode === 'unsorted') {
+            this.sortAscending = true;
+        } else {
+            this.sortAscending = false;
+        }
+        this.applyFileFilter();
+    }
+
+    toggleSortDirection() {
+        this.sortAscending = !this.sortAscending;
+        this.applyFileFilter();
+    }
+
+    describeSortMode() {
+        const mode = this.getCurrentSortMode();
+        if (mode === 'unsorted') {
+            return this.sortAscending ? 'Natural' : 'Natural (Reversed)';
+        }
+        const labelMap = {
+            name: 'Name',
+            date: 'Modified',
+            size: 'Size'
+        };
+        const arrow = this.sortAscending ? '↑' : '↓';
+        return `${labelMap[mode] ?? 'Original'} ${arrow}`;
+    }
+
+    updateSortStatus() {
+        const element = document.getElementById('status');
+        if (!element) {
+            return;
+        }
+        element.textContent = `ONLINE · Sort: ${this.describeSortMode()}`;
     }
 
     async loadFavourites() {
