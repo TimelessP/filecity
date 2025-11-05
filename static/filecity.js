@@ -1802,7 +1802,8 @@ class FileCity {
                 opacity: 1,
                 toneMapped: false,
                 depthWrite: false,
-                depthTest: false
+                depthTest: false,
+                fog: false
             });
             cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
             cube.position.set(0, topY, 0);
@@ -1823,7 +1824,8 @@ class FileCity {
                         opacity: 1,
                         toneMapped: false,
                         depthWrite: false,
-                        depthTest: false
+                        depthTest: false,
+                        fog: false
                     });
                 }
                 material.map = texture;
@@ -1832,6 +1834,7 @@ class FileCity {
                 material.toneMapped = false;
                 material.depthWrite = false;
                 material.depthTest = false;
+                material.fog = false;
                 material.needsUpdate = true;
                 return material;
             };
