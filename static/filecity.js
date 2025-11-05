@@ -85,6 +85,7 @@ class FileCity {
     this.processPollInFlight = false;
     this.processPollErrorLogged = false;
     this.lastFrameTime = performance.now();
+    this.particleSystem = null;
 
         // Media/file type helpers
     this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'apng', 'tif', 'tiff', 'ico']);
@@ -523,11 +524,16 @@ class FileCity {
         const particles = new THREE.BufferGeometry();
         const positions = new Float32Array(particleCount * 3);
         const colors = new Float32Array(particleCount * 3);
+        const baseY = new Float32Array(particleCount);
+        const amplitudes = new Float32Array(particleCount);
+        const speeds = new Float32Array(particleCount);
+        const phases = new Float32Array(particleCount);
 
         for (let i = 0; i < particleCount; i++) {
             const i3 = i * 3;
             positions[i3] = (Math.random() - 0.5) * 400;
-            positions[i3 + 1] = Math.random() * 200;
+            const y = Math.random() * 200;
+            positions[i3 + 1] = y;
             positions[i3 + 2] = (Math.random() - 0.5) * 400;
 
             const color = new THREE.Color();
@@ -535,6 +541,11 @@ class FileCity {
             colors[i3] = color.r;
             colors[i3 + 1] = color.g;
             colors[i3 + 2] = color.b;
+
+            baseY[i] = y;
+            amplitudes[i] = 0.4 + Math.random() * 1.8;
+            speeds[i] = 0.15 + Math.random() * 0.35;
+            phases[i] = Math.random() * Math.PI * 2;
         }
 
         particles.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -549,6 +560,14 @@ class FileCity {
         });
 
         const particleSystem = new THREE.Points(particles, particleMaterial);
+        particleSystem.userData = {
+            baseY,
+            amplitudes,
+            speeds,
+            phases,
+            startTime: performance.now()
+        };
+        this.particleSystem = particleSystem;
         this.scene.add(particleSystem);
     }
 
@@ -2930,12 +2949,29 @@ class FileCity {
     }
 
     updateParticles() {
-        const time = Date.now() * 0.0005;
-        this.scene.traverse((child) => {
-            if (child.isPoints) {
-                child.rotation.y = time;
-            }
-        });
+        if (!this.particleSystem || !this.particleSystem.geometry) {
+            return;
+        }
+        const geometry = this.particleSystem.geometry;
+        const positions = geometry.attributes?.position;
+        if (!positions) {
+            return;
+        }
+        const { baseY, amplitudes, speeds, phases, startTime } = this.particleSystem.userData || {};
+        if (!baseY || !amplitudes || !speeds || !phases) {
+            return;
+        }
+        const time = (performance.now() - (startTime ?? 0)) / 1000;
+        const array = positions.array;
+        const count = baseY.length;
+        for (let i = 0; i < count; i++) {
+            const i3 = i * 3 + 1;
+            const phase = phases[i];
+            const speed = speeds[i];
+            const amplitude = amplitudes[i];
+            array[i3] = baseY[i] + Math.sin(time * speed + phase) * amplitude;
+        }
+        positions.needsUpdate = true;
     }
 
     updateLoadingProgress(percent, status) {
