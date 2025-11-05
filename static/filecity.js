@@ -1733,7 +1733,7 @@ class FileCity {
         }
 
         this.drawSourceToCanvas(bitmap, canvas, ctx, {
-            background: 'rgba(0, 0, 0, 0.92)',
+            background: 'rgba(0, 0, 0, 1.0)',
             padding: 8,
             stroke: 'rgba(0, 255, 255, 0.35)',
             strokeWidth: 3,
@@ -2231,7 +2231,7 @@ class FileCity {
         }
 
         this.drawSourceToCanvas(this.videoElement, this.videoCanvas, this.videoCanvasCtx, {
-            background: 'rgba(0, 0, 0, 0.92)',
+            background: 'rgba(0, 0, 0, 1.0)',
             padding: 8,
             stroke: 'rgba(255, 0, 128, 0.4)',
             strokeWidth: 3,
@@ -2939,16 +2939,16 @@ class FileCity {
             return null;
         }
 
-        let intersect = intersects.find((hit) => hit.object?.userData?.isBuildingBody);
-        if (!intersect) {
-            intersect = intersects[0];
+        for (const hit of intersects) {
+            let node = hit.object;
+            while (node && !node.userData?.fileInfo) {
+                node = node.parent;
+            }
+            if (node && node.userData?.fileInfo) {
+                return node;
+            }
         }
-
-        let node = intersect.object;
-        while (node && !node.userData.fileInfo) {
-            node = node.parent;
-        }
-        return node || null;
+        return null;
     }
 
     applyFavouriteStyling(building, isFavourite) {
