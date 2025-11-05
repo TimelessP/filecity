@@ -61,6 +61,7 @@ class FileCity {
         this.gotoCancelButton = null;
         this.gotoFeedback = null;
         this.modalActive = false;
+    this.pointerLockBeforeModal = false;
         this.autopilot = null;
         this.lastCameraUpdate = performance.now();
 
@@ -245,7 +246,9 @@ class FileCity {
         });
 
         document.addEventListener('pointerlockchange', () => {
-            this.isPointerLocked = document.pointerLockElement === document.body;
+            const lockElement = document.pointerLockElement;
+            const canvas = this.renderer?.domElement || null;
+            this.isPointerLocked = lockElement === document.body || (canvas && lockElement === canvas);
             if (!this.isPointerLocked) {
                 this.cancelRightClickHold();
             }
@@ -374,7 +377,10 @@ class FileCity {
     }
 
     requestPointerLock() {
-        document.body.requestPointerLock();
+        const target = this.renderer?.domElement || document.body;
+        if (target && target.requestPointerLock) {
+            target.requestPointerLock();
+        }
     }
 
     createScene() {
@@ -1661,6 +1667,7 @@ class FileCity {
         if (!this.gotoModal || this.modalActive) {
             return;
         }
+        this.pointerLockBeforeModal = this.isPointerLocked;
         this.autopilot = null;
         this.modalActive = true;
         this.gotoModal.classList.add('visible');
@@ -1687,6 +1694,14 @@ class FileCity {
         if (this.gotoInput) {
             this.gotoInput.blur();
         }
+        if (this.pointerLockBeforeModal && !this.isPointerLocked) {
+            try {
+                this.requestPointerLock();
+            } catch (error) {
+                console.warn('FileCity: pointer lock request failed after closing modal', error);
+            }
+        }
+        this.pointerLockBeforeModal = false;
     }
 
     handleModalKeydown(event) {
