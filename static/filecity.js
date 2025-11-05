@@ -79,6 +79,12 @@ class FileCity {
         this.suppressPointerLockResume = false;
         this.autopilot = null;
         this.lastCameraUpdate = performance.now();
+    this.processPollHandle = null;
+    this.processPollIntervalMs = 20000;
+    this.activeProcessMap = new Map();
+    this.processPollInFlight = false;
+    this.processPollErrorLogged = false;
+    this.lastFrameTime = performance.now();
 
         // Media/file type helpers
         this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif', 'apng', 'tif', 'tiff', 'ico']);
@@ -139,6 +145,7 @@ class FileCity {
 
         await this.loadDirectory();
         this.updateLoadingProgress(90, "Materializing data structures...");
+    this.startProcessPolling();
 
         this.animate();
         this.updateLoadingProgress(100, "FileCity Matrix Online!");
@@ -652,6 +659,7 @@ class FileCity {
 
             await this.loadFavourites();
             this.applyFileFilter();
+            await this.pollProcessActivity();
             this.applyPendingViewState();
             this.pendingStackPushPath = null;
         } catch (error) {
@@ -687,6 +695,7 @@ class FileCity {
         this.restoreActiveMedia(mediaContext);
         this.forcePreviewRefresh();
         this.updateStatusDisplay(true);
+        this.updateProcessIndicatorAssignments(this.activeProcessMap);
     }
 
     getCurrentSortMode() {
@@ -933,6 +942,9 @@ class FileCity {
 
     clearBuildings() {
         this.buildings.forEach((building) => {
+            if (building?.userData?.processIndicator) {
+                this.removeProcessIndicator(building, true);
+            }
             this.removePreviewCube(building);
             building.traverse(child => {
                 if (child.isMesh || child.isLine || child.isSprite) {
@@ -1061,6 +1073,8 @@ class FileCity {
             height,
             baseSize,
             previewCube: null,
+            previewCubeSize: null,
+            previewCubeTop: null,
             previewMode: null,
             previewAssets: {},
             currentMedia: null,
@@ -1088,6 +1102,339 @@ class FileCity {
     forcePreviewRefresh() {
         this.lastPreviewUpdate = 0;
         this.updateBuildingPreviews(true);
+    }
+
+    startProcessPolling() {
+        this.stopProcessPolling();
+        this.pollProcessActivity();
+        this.processPollHandle = setInterval(() => {
+            this.pollProcessActivity();
+        }, this.processPollIntervalMs);
+    }
+
+    stopProcessPolling() {
+        if (this.processPollHandle) {
+            clearInterval(this.processPollHandle);
+            this.processPollHandle = null;
+        }
+    }
+
+    async pollProcessActivity() {
+        if (!this.currentPath) {
+            return;
+        }
+        if (this.processPollInFlight) {
+            return;
+        }
+        this.processPollInFlight = true;
+        let nextMap = new Map();
+        try {
+            const response = await fetch(`/api/open-files?directory=${encodeURIComponent(this.currentPath)}`);
+            if (!response.ok) {
+                throw new Error(`Status ${response.status}`);
+            }
+            const payload = await response.json();
+            if (Array.isArray(payload)) {
+                payload.forEach((entry) => {
+                    if (!entry || !entry.path) {
+                        return;
+                    }
+                    const processes = Array.isArray(entry.processes) ? entry.processes : [];
+                    const keys = [];
+                    keys.push(entry.path);
+                    if (entry.resolved_path) {
+                        keys.push(entry.resolved_path);
+                    }
+                    keys.forEach((key) => {
+                        if (!key) {
+                            return;
+                        }
+                        const normalized = this.stripTrailingSeparators(String(key));
+                        if (!nextMap.has(normalized)) {
+                            nextMap.set(normalized, processes);
+                        }
+                    });
+                });
+            }
+            this.processPollErrorLogged = false;
+        } catch (error) {
+            if (!this.processPollErrorLogged) {
+                console.warn('Process activity poll failed:', error);
+                this.processPollErrorLogged = true;
+            }
+            nextMap = new Map();
+        } finally {
+            this.processPollInFlight = false;
+        }
+        this.activeProcessMap = nextMap;
+        this.updateProcessIndicatorAssignments(this.activeProcessMap);
+    }
+
+    stripTrailingSeparators(value) {
+        if (typeof value !== 'string') {
+            return value;
+        }
+        const trimmed = value.replace(/[\\/]+$/, '');
+        return trimmed.length ? trimmed : value;
+    }
+
+    computeProcessIndicatorMinHeight(building, radius) {
+        const data = building?.userData || {};
+        const height = typeof data.height === 'number' ? data.height : 0;
+        const previewTop = typeof data.previewCubeTop === 'number' ? data.previewCubeTop : null;
+        const baseClearance = Math.max(radius, 0.6);
+        const buildingBaseline = height + baseClearance;
+        if (previewTop !== null) {
+            return Math.max(previewTop + radius, buildingBaseline);
+        }
+        return buildingBaseline;
+    }
+
+    computeProcessIndicatorVerticalRange(building) {
+        const data = building?.userData || {};
+        const height = typeof data.height === 'number' ? data.height : 0;
+        const targetRange = Math.min(1.8, Math.max(0.6, height * 0.25));
+        return Math.max(0.4, targetRange);
+    }
+
+    refreshProcessIndicatorConstraints(building, indicator, now = performance.now()) {
+        if (!indicator) {
+            return;
+        }
+        const initialising = !indicator.initialized;
+        const minHeight = this.computeProcessIndicatorMinHeight(building, indicator.radius);
+        indicator.minHeight = minHeight;
+        indicator.baseHeight = minHeight;
+        indicator.verticalRange = this.computeProcessIndicatorVerticalRange(building);
+
+        indicator.pauseUntil = Math.max(indicator.pauseUntil ?? now, now);
+
+        if (initialising) {
+            indicator.group.position.set(0, minHeight, 0);
+            indicator.startPosition.set(0, minHeight, 0);
+            indicator.endPosition.set(0, minHeight, 0);
+            indicator.state = 'paused';
+            return;
+        }
+
+        indicator.group.position.y = Math.max(indicator.group.position.y, minHeight);
+        indicator.startPosition.y = Math.max(indicator.startPosition.y, minHeight);
+        indicator.endPosition.y = Math.max(indicator.endPosition.y, minHeight);
+
+        if (indicator.state !== 'moving') {
+            indicator.startPosition.copy(indicator.group.position);
+            indicator.endPosition.copy(indicator.group.position);
+            indicator.state = 'paused';
+        }
+    }
+
+    updateProcessIndicatorAssignments(activeMap = new Map()) {
+        if (!Array.isArray(this.buildings) || !this.buildings.length) {
+            return;
+        }
+        const now = performance.now();
+        this.buildings.forEach((building) => {
+            const data = building.userData;
+            if (!data || !data.fileInfo || data.fileInfo.is_directory) {
+                if (data?.processIndicator) {
+                    this.removeProcessIndicator(building);
+                }
+                return;
+            }
+            const path = data.fileInfo.path ? this.stripTrailingSeparators(data.fileInfo.path) : null;
+            const processes = path ? activeMap.get(path) || activeMap.get(this.stripTrailingSeparators(path)) : null;
+            if (processes && processes.length) {
+                this.ensureProcessIndicator(building, processes, now);
+            } else if (data.processIndicator) {
+                this.removeProcessIndicator(building);
+            }
+        });
+    }
+
+    ensureProcessIndicator(building, processes, now = performance.now()) {
+        const data = building.userData;
+        let indicator = data.processIndicator;
+        if (!indicator) {
+            indicator = this.createProcessIndicator(building);
+            data.processIndicator = indicator;
+        }
+        indicator.radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
+        indicator.verticalRange = this.computeProcessIndicatorVerticalRange(building);
+        this.refreshProcessIndicatorConstraints(building, indicator, now);
+        indicator.processes = processes;
+        indicator.lastActive = now;
+        if (!indicator.initialized) {
+            indicator.initialized = true;
+        }
+    }
+
+    createProcessIndicator(building) {
+        const data = building.userData;
+        const radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
+        const size = Math.max(0.4, Math.min(1.2, (data.baseSize ?? 2.4) * 0.3));
+
+        const geometry = new THREE.DodecahedronGeometry(size);
+        const fillMaterial = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            transparent: true,
+            opacity: 0.5,
+            depthWrite: false
+        });
+        const mesh = new THREE.Mesh(geometry, fillMaterial);
+
+        const edgeMaterial = new THREE.LineBasicMaterial({
+            color: 0xff4a1f,
+            transparent: true,
+            opacity: 0.85,
+            linewidth: 1.2,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry.clone()), edgeMaterial);
+
+        const group = new THREE.Group();
+        group.add(mesh);
+        group.add(edges);
+        group.renderOrder = 10;
+        group.userData = group.userData || {};
+        group.userData.retainShared = false;
+
+        const minHeight = this.computeProcessIndicatorMinHeight(building, radius);
+        const verticalRange = this.computeProcessIndicatorVerticalRange(building);
+
+        group.position.set(0, minHeight, 0);
+
+        building.add(group);
+
+        const now = performance.now();
+
+        return {
+            group,
+            mesh,
+            edges,
+            baseHeight: minHeight,
+            minHeight,
+            radius,
+            verticalRange,
+            processes: [],
+            startTime: now,
+            duration: 2000,
+            startPosition: new THREE.Vector3(0, minHeight, 0),
+            endPosition: new THREE.Vector3(0, minHeight, 0),
+            tempVector: new THREE.Vector3(),
+            state: 'paused',
+            pauseUntil: now,
+            pulseOffset: Math.random() * Math.PI * 2,
+            initialized: false,
+            lastActive: now,
+            edgeBaseColor: new THREE.Color(0xff4a1f),
+            edgeGlowColor: new THREE.Color(0xffc266)
+        };
+    }
+
+    removeProcessIndicator(building, quiet = false) {
+        const data = building.userData;
+        const indicator = data?.processIndicator;
+        if (!indicator) {
+            return;
+        }
+
+        if (indicator.group.parent === building) {
+            building.remove(indicator.group);
+        }
+
+        indicator.group.traverse((child) => {
+            if (child.geometry) {
+                child.geometry.dispose?.();
+            }
+            if (Array.isArray(child.material)) {
+                child.material.forEach(material => material?.dispose?.());
+            } else {
+                child.material?.dispose?.();
+            }
+        });
+        indicator.group.clear();
+
+        data.processIndicator = null;
+    }
+
+    beginProcessIndicatorMove(building, indicator, now) {
+        indicator.startPosition.copy(indicator.group.position);
+        indicator.endPosition.copy(this.computeProcessIndicatorTarget(building, indicator));
+        indicator.startTime = now;
+        indicator.duration = 1800 + Math.random() * 2000;
+        indicator.state = 'moving';
+    }
+
+    computeProcessIndicatorTarget(building, indicator) {
+        const angle = Math.random() * Math.PI * 2;
+        const distance = indicator.radius * (0.3 + Math.random() * 0.7);
+        const verticalRange = indicator.verticalRange ?? this.computeProcessIndicatorVerticalRange(building);
+        const minHeight = indicator.minHeight ?? indicator.baseHeight ?? 0;
+        const yOffset = minHeight + Math.random() * verticalRange;
+        indicator.tempVector.set(
+            Math.cos(angle) * distance,
+            yOffset,
+            Math.sin(angle) * distance
+        );
+        return indicator.tempVector;
+    }
+
+    easeInOutCubic(t) {
+        if (t < 0.5) {
+            return 4 * t * t * t;
+        }
+        const factor = -2 * t + 2;
+        return 1 - (factor * factor * factor) / 2;
+    }
+
+    updateProcessIndicators(now, delta) {
+        if (!Array.isArray(this.buildings) || !this.buildings.length) {
+            return;
+        }
+        this.buildings.forEach((building) => {
+            const indicator = building.userData?.processIndicator;
+            if (!indicator) {
+                return;
+            }
+
+            indicator.group.rotation.y += delta * 0.9;
+            indicator.group.rotation.x += delta * 0.2;
+            indicator.mesh.scale.setScalar(1);
+
+            const pulsePhase = (now * 0.005) + indicator.pulseOffset;
+            const pulse = (Math.sin(pulsePhase) + 1) / 2;
+            const edgeMaterial = indicator.edges?.material;
+            if (edgeMaterial && edgeMaterial.color && indicator.edgeBaseColor && indicator.edgeGlowColor) {
+                edgeMaterial.color.copy(indicator.edgeBaseColor).lerp(indicator.edgeGlowColor, pulse * 0.85 + 0.15);
+                edgeMaterial.opacity = 0.55 + 0.35 * Math.sin((now * 0.004) + indicator.pulseOffset * 0.5);
+                edgeMaterial.needsUpdate = true;
+            }
+
+            if (indicator.state === 'paused') {
+                if (now >= indicator.pauseUntil) {
+                    this.beginProcessIndicatorMove(building, indicator, now);
+                }
+            } else if (indicator.state === 'moving') {
+                const elapsed = now - indicator.startTime;
+                const duration = Math.max(300, indicator.duration);
+                const progress = Math.min(1, Math.max(0, elapsed / duration));
+                const eased = this.easeInOutCubic(progress);
+                indicator.group.position.copy(indicator.startPosition).lerp(indicator.endPosition, eased);
+                const minHeight = indicator.minHeight ?? indicator.baseHeight ?? 0;
+                if (indicator.group.position.y < minHeight) {
+                    indicator.group.position.y = minHeight;
+                }
+                if (progress >= 1) {
+                    indicator.group.position.copy(indicator.endPosition);
+                    if (indicator.group.position.y < minHeight) {
+                        indicator.group.position.y = minHeight;
+                    }
+                    indicator.state = 'paused';
+                    indicator.pauseUntil = now + 500 + Math.random() * 1200;
+                }
+            }
+        });
     }
 
     updateBuildingPreviews(force = false) {
@@ -1484,9 +1831,15 @@ class FileCity {
             }
         }
 
+        data.previewCubeSize = cubeSize;
+        data.previewCubeTop = data.height + cubeSize + verticalGap;
+
+        if (data.processIndicator) {
+            this.refreshProcessIndicatorConstraints(building, data.processIndicator, performance.now());
+        }
+
         texture.needsUpdate = true;
-        const cubeTop = data.height + cubeSize + verticalGap;
-        this.positionLabelsForPreview(building, true, cubeTop);
+        this.positionLabelsForPreview(building, true, data.previewCubeTop);
     }
 
     removePreviewCube(building) {
@@ -1498,6 +1851,11 @@ class FileCity {
         }
         this.disposePreviewCube(building, cube);
         data.previewCube = null;
+        data.previewCubeSize = null;
+        data.previewCubeTop = null;
+        if (data.processIndicator) {
+            this.refreshProcessIndicatorConstraints(building, data.processIndicator, performance.now());
+        }
         this.positionLabelsForPreview(building, false);
     }
 
@@ -2472,10 +2830,15 @@ class FileCity {
     animate() {
         requestAnimationFrame(() => this.animate());
 
+        const frameNow = performance.now();
+        const delta = (frameNow - this.lastFrameTime) / 1000;
+        this.lastFrameTime = frameNow;
+
         this.updateCamera();
         this.updateParticles();
         this.updateBuildingPreviews();
         this.updateMediaHighlights();
+        this.updateProcessIndicators(frameNow, delta);
         this.updateVideoFrame();
         this.refreshStatusTicker();
 

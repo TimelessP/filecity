@@ -7,9 +7,10 @@ import os
 import json
 import math
 import mimetypes
+import subprocess
 from threading import Lock
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -51,6 +52,17 @@ class HexPreview(BaseModel):
 class FavouriteRequest(BaseModel):
     path: str
     favourite: bool
+
+
+class OpenFileProcess(BaseModel):
+    pid: int
+    command: str
+
+
+class OpenFileEntry(BaseModel):
+    path: str
+    resolved_path: Optional[str] = None
+    processes: List[OpenFileProcess]
 
 
 # Initialize FastAPI app
@@ -176,6 +188,117 @@ def calculate_log_size(size: int) -> float:
     return normalized
 
 
+def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Path) -> Optional[tuple[str, str]]:
+    """Clean and normalize an lsof path value, restricting it to direct children of directory."""
+    if not raw_path:
+        return None
+
+    cleaned = raw_path.split(' (deleted)', 1)[0].strip()
+    if not cleaned:
+        return None
+
+    dir_str = str(directory_resolved)
+    if not os.path.isabs(cleaned):
+        absolute_str = os.path.normpath(os.path.join(dir_str, cleaned))
+    else:
+        absolute_str = os.path.normpath(cleaned)
+
+    try:
+        relative = os.path.relpath(absolute_str, dir_str)
+    except ValueError:
+        return None
+
+    if relative == '.':
+        return None
+    if relative.startswith('..'):
+        return None
+    if os.sep in relative:
+        return None
+
+    resolved_str = os.path.realpath(absolute_str)
+    return absolute_str, resolved_str
+
+
+def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
+    """Invoke lsof and return open files directly within the given directory."""
+    command = ["lsof", "-Fpcfn", "+d", str(directory)]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="lsof command is not available on this system") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Timed out while running lsof") from exc
+
+    # lsof returns 1 when no matches are found.
+    if result.returncode not in (0, 1):
+        detail = result.stderr.strip() or "Unable to inspect open files"
+        raise HTTPException(status_code=500, detail=detail)
+
+    directory_resolved = directory.resolve(strict=False)
+    entries: Dict[str, Dict[str, object]] = {}
+    current_pid: Optional[int] = None
+    current_command: Optional[str] = None
+
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        field = line[0]
+        value = line[1:]
+
+        if field == 'p':
+            try:
+                current_pid = int(value.strip())
+            except ValueError:
+                current_pid = None
+            current_command = None
+        elif field == 'c':
+            current_command = value.strip()
+        elif field == 'n':
+            if current_pid is None:
+                continue
+            normalized = _normalize_lsof_path(value, directory, directory_resolved)
+            if not normalized:
+                continue
+            absolute_str, resolved_str = normalized
+            entry = entries.setdefault(
+                absolute_str,
+                {
+                    "path": absolute_str,
+                    "resolved_path": resolved_str,
+                    "processes": []
+                }
+            )
+            processes: List[Dict[str, object]] = entry["processes"]  # type: ignore[assignment]
+            if not any(proc.get("pid") == current_pid for proc in processes):
+                processes.append({
+                    "pid": current_pid,
+                    "command": current_command or ""
+                })
+
+    open_files: List[OpenFileEntry] = []
+    for entry in entries.values():
+        processes_data = entry["processes"]  # type: ignore[assignment]
+        if not processes_data:
+            continue
+        open_files.append(
+            OpenFileEntry(
+                path=str(entry["path"]),
+                resolved_path=str(entry["resolved_path"]),
+                processes=[OpenFileProcess(**proc) for proc in processes_data]
+            )
+        )
+
+    open_files.sort(key=lambda item: item.path.lower())
+
+    return open_files
+
+
 @app.get("/")
 async def root():
     """Serve the main 3D interface"""
@@ -279,6 +402,14 @@ async def set_favourite(request: FavouriteRequest) -> List[str]:
     sorted_favs = sorted(favourites)
     save_favourites(sorted_favs)
     return sorted_favs
+
+
+@app.get("/api/open-files")
+async def get_open_files(directory: Optional[str] = None) -> List[OpenFileEntry]:
+    target_path = get_safe_path(directory or str(Path.home()))
+    if not target_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    return list_open_files_for_directory(target_path)
 
 
 @app.get("/api/file-info")
