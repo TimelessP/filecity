@@ -3,6 +3,7 @@ FileCIty: A 3D Cyberpunk File System Browser
 FastAPI backend for serving file system data and 3D visualization
 """
 
+import argparse
 import os
 import json
 import math
@@ -13,11 +14,56 @@ from threading import Lock
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+
+load_dotenv()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _resolve_root_dir(path_str: str) -> Path:
+    candidate = Path(path_str).expanduser()
+    resolved = candidate.resolve()
+    if not resolved.exists():
+        raise ValueError(f"Configured root directory '{candidate}' does not exist")
+    if not resolved.is_dir():
+        raise ValueError(f"Configured root directory '{candidate}' is not a directory")
+    if not os.access(resolved, os.R_OK):
+        raise ValueError(f"Configured root directory '{candidate}' is not readable")
+    return resolved
+
+
+def _determine_root_dir() -> Path:
+    configured = os.getenv("FILECITY_ROOT_DIR")
+    if configured:
+        try:
+            return _resolve_root_dir(configured)
+        except ValueError as exc:
+            print(f"Warning: {exc}; falling back to the user's home directory.")
+    return _resolve_root_dir(str(Path.home()))
+
 
 
 # Pydantic models for API responses
@@ -90,9 +136,25 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+ROOT_DIR = _determine_root_dir()
+HOST = os.getenv("FILECITY_HOST", "0.0.0.0")
+PORT = _env_int("FILECITY_PORT", 8000)
+RELOAD = _env_bool("FILECITY_RELOAD", True)
+LSOF_REQUESTED = _env_bool("FILECITY_LSOF_ENABLED", True)
+LSOF_BINARY_PRESENT = shutil.which("lsof") is not None
+LSOF_ENABLED = LSOF_REQUESTED and LSOF_BINARY_PRESENT
+
+
+def _is_path_within_root(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(ROOT_DIR)
+        return True
+    except ValueError:
+        return False
+
+
 FAVOURITES_FILE = Path("data/favourites.json")
 FAVOURITES_LOCK = Lock()
-LSOF_AVAILABLE = shutil.which("lsof") is not None
 
 
 def ensure_favourites_file() -> None:
@@ -128,11 +190,14 @@ def get_safe_path(requested_path: str) -> Path:
     Only allows access to files the current user can access.
     """
     if not requested_path:
-        requested_path = str(Path.home())
+        requested_path = str(ROOT_DIR)
     
     try:
         # Resolve the path and ensure it exists
-        resolved_path = Path(requested_path).resolve()
+        resolved_path = Path(requested_path).expanduser().resolve()
+
+        if not _is_path_within_root(resolved_path):
+            raise HTTPException(status_code=403, detail="Access outside the configured root directory is denied")
         
         # Basic security: ensure the path exists and is accessible
         if not resolved_path.exists():
@@ -227,7 +292,7 @@ def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Pat
 
 def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
     """Invoke lsof and return open files directly within the given directory."""
-    if not LSOF_AVAILABLE:
+    if not LSOF_ENABLED:
         raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system")
     command = ["lsof", "-Fpcfn", "+d", str(directory)]
     try:
@@ -316,7 +381,7 @@ async def root():
 @app.get("/api/capabilities")
 async def get_capabilities() -> CapabilityResponse:
     """Expose server capability flags for the frontend handshake."""
-    return CapabilityResponse(lsof_available=LSOF_AVAILABLE)
+    return CapabilityResponse(lsof_available=LSOF_ENABLED)
 
 
 @app.get("/api/browse")
@@ -325,7 +390,7 @@ async def browse_directory(path: str = None) -> DirectoryListing:
     Browse directory contents for 3D visualization
     """
     if path is None:
-        path = str(Path.home())
+        path = str(ROOT_DIR)
     
     safe_path = get_safe_path(path)
     
@@ -362,7 +427,11 @@ async def browse_directory(path: str = None) -> DirectoryListing:
         raise HTTPException(status_code=403, detail=f"Cannot access directory: {str(e)}")
     
     # Get parent directory
-    parent = str(safe_path.parent) if safe_path.parent != safe_path else None
+    if safe_path == ROOT_DIR:
+        parent = None
+    else:
+        potential_parent = safe_path.parent
+        parent = str(potential_parent) if _is_path_within_root(potential_parent) else None
     
     return DirectoryListing(
         path=str(safe_path),
@@ -420,7 +489,7 @@ async def set_favourite(request: FavouriteRequest) -> List[str]:
 
 @app.get("/api/open-files")
 async def get_open_files(directory: Optional[str] = None) -> List[OpenFileEntry]:
-    target_path = get_safe_path(directory or str(Path.home()))
+    target_path = get_safe_path(directory or str(ROOT_DIR))
     if not target_path.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
     return list_open_files_for_directory(target_path)
@@ -461,6 +530,69 @@ async def get_file_info(path: str) -> FileInfo:
 
 if __name__ == "__main__":
     import uvicorn
+    parser = argparse.ArgumentParser(description="Run the FileCity server")
+    parser.add_argument(
+        "--root-dir",
+        dest="root_dir",
+        default=str(ROOT_DIR),
+        help="Restrict browsing to this directory (default: FILECITY_ROOT_DIR or the user's home directory)",
+    )
+    parser.add_argument(
+        "--host",
+        dest="host",
+        default=HOST,
+        help="Host interface to bind (default: FILECITY_HOST or 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=int,
+        default=PORT,
+        help="Port to bind (default: FILECITY_PORT or 8000)",
+    )
+    parser.add_argument(
+        "--reload",
+        dest="reload",
+        action="store_true",
+        default=RELOAD,
+        help="Enable auto-reload (default: FILECITY_RELOAD)",
+    )
+    parser.add_argument(
+        "--no-reload",
+        dest="reload",
+        action="store_false",
+        help="Disable auto-reload",
+    )
+    parser.add_argument(
+        "--lsof-enabled",
+        dest="lsof_enabled",
+        action="store_true",
+        default=LSOF_REQUESTED,
+        help="Enable lsof-based process monitoring (default: FILECITY_LSOF_ENABLED)",
+    )
+    parser.add_argument(
+        "--no-lsof",
+        dest="lsof_enabled",
+        action="store_false",
+        help="Disable lsof-based process monitoring",
+    )
+    args = parser.parse_args()
+
+    try:
+        ROOT_DIR = _resolve_root_dir(str(args.root_dir))
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    HOST = args.host
+    PORT = args.port
+    RELOAD = args.reload
+    LSOF_REQUESTED = args.lsof_enabled
+    LSOF_ENABLED = LSOF_REQUESTED and LSOF_BINARY_PRESENT
+    if LSOF_REQUESTED and not LSOF_ENABLED:
+        print("Warning: lsof-based monitoring requested but lsof is not available on this system. Feature disabled.")
+
     print("Starting FileCity server...")
-    print("Navigate to http://localhost:8000 to enter the cyberpunk file matrix!")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    print(f"Root directory: {ROOT_DIR}")
+    print(f"Process monitoring enabled: {'yes' if LSOF_ENABLED else 'no'}")
+    print(f"Navigate to http://{HOST}:{PORT} to enter the cyberpunk file matrix!")
+    uvicorn.run("main:app", host=HOST, port=PORT, reload=RELOAD)
