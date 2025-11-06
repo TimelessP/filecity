@@ -1,3 +1,5 @@
 fastapi
 pydantic
 uvicorn
+chardet
+python-dotenv

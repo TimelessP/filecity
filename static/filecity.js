@@ -86,6 +86,8 @@ class FileCity {
     this.processPollErrorLogged = false;
     this.lastFrameTime = performance.now();
     this.particleSystem = null;
+    this.capabilities = {};
+    this.processMonitoringEnabled = false;
 
         // Media/file type helpers
     this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'apng', 'tif', 'tiff', 'ico']);
@@ -142,11 +144,14 @@ class FileCity {
         this.updateLoadingProgress(60, "Syncing favourites cache...");
 
         await this.loadFavourites();
+        await this.fetchCapabilities();
         this.updateLoadingProgress(70, "Scanning file matrix...");
 
         await this.loadDirectory();
         this.updateLoadingProgress(90, "Materializing data structures...");
-    this.startProcessPolling();
+        if (this.processMonitoringEnabled) {
+            this.startProcessPolling();
+        }
 
         this.animate();
         this.updateLoadingProgress(100, "FileCity Matrix Online!");
@@ -678,7 +683,11 @@ class FileCity {
 
             await this.loadFavourites();
             this.applyFileFilter();
-            await this.pollProcessActivity();
+            if (this.processMonitoringEnabled) {
+                await this.pollProcessActivity();
+            } else {
+                this.updateProcessIndicatorAssignments(this.activeProcessMap || new Map());
+            }
             this.applyPendingViewState();
             this.pendingStackPushPath = null;
         } catch (error) {
@@ -959,6 +968,27 @@ class FileCity {
         }
     }
 
+    async fetchCapabilities() {
+        try {
+            const response = await fetch('/api/capabilities');
+            if (!response.ok) {
+                throw new Error(`Status ${response.status}`);
+            }
+            const data = await response.json();
+            this.capabilities = data || {};
+            if (data && data.lsof_available) {
+                this.capabilities.lsof_available = true;
+                this.processMonitoringEnabled = true;
+            } else {
+                this.handleProcessMonitoringUnavailable({ skipLog: true });
+            }
+        } catch (error) {
+            console.warn('Failed to fetch capabilities:', error);
+            this.capabilities = {};
+            this.handleProcessMonitoringUnavailable({ skipLog: true });
+        }
+    }
+
     clearBuildings() {
         this.buildings.forEach((building) => {
             if (building?.userData?.processIndicator) {
@@ -1123,8 +1153,29 @@ class FileCity {
         this.updateBuildingPreviews(true);
     }
 
-    startProcessPolling() {
+    handleProcessMonitoringUnavailable(options = {}) {
+        const { skipLog = false } = options || {};
+        if (!skipLog) {
+            console.info('Process monitoring disabled: open-file inspection unavailable.');
+        }
+        if (this.capabilities) {
+            this.capabilities.lsof_available = false;
+        }
+        this.processMonitoringEnabled = false;
         this.stopProcessPolling();
+        this.processPollInFlight = false;
+        const emptyMap = new Map();
+        this.activeProcessMap = emptyMap;
+        this.updateProcessIndicatorAssignments(emptyMap);
+        this.processPollErrorLogged = false;
+    }
+
+    startProcessPolling() {
+        if (!this.processMonitoringEnabled) {
+            return;
+        }
+        this.stopProcessPolling();
+        this.processPollErrorLogged = false;
         this.pollProcessActivity();
         this.processPollHandle = setInterval(() => {
             this.pollProcessActivity();
@@ -1139,6 +1190,9 @@ class FileCity {
     }
 
     async pollProcessActivity() {
+        if (!this.processMonitoringEnabled) {
+            return;
+        }
         if (!this.currentPath) {
             return;
         }
@@ -1149,6 +1203,10 @@ class FileCity {
         let nextMap = new Map();
         try {
             const response = await fetch(`/api/open-files?directory=${encodeURIComponent(this.currentPath)}`);
+            if (response.status === 400) {
+                this.handleProcessMonitoringUnavailable();
+                return;
+            }
             if (!response.ok) {
                 throw new Error(`Status ${response.status}`);
             }

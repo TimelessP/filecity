@@ -7,6 +7,7 @@ import os
 import json
 import math
 import mimetypes
+import shutil
 import subprocess
 from threading import Lock
 from pathlib import Path
@@ -65,6 +66,10 @@ class OpenFileEntry(BaseModel):
     processes: List[OpenFileProcess]
 
 
+class CapabilityResponse(BaseModel):
+    lsof_available: bool
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="FileCity",
@@ -87,6 +92,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 FAVOURITES_FILE = Path("data/favourites.json")
 FAVOURITES_LOCK = Lock()
+LSOF_AVAILABLE = shutil.which("lsof") is not None
 
 
 def ensure_favourites_file() -> None:
@@ -221,6 +227,8 @@ def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Pat
 
 def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
     """Invoke lsof and return open files directly within the given directory."""
+    if not LSOF_AVAILABLE:
+        raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system")
     command = ["lsof", "-Fpcfn", "+d", str(directory)]
     try:
         result = subprocess.run(
@@ -231,7 +239,7 @@ def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
             timeout=5
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail="lsof command is not available on this system") from exc
+        raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system") from exc
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail="Timed out while running lsof") from exc
 
@@ -303,6 +311,12 @@ def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
 async def root():
     """Serve the main 3D interface"""
     return FileResponse('static/index.html')
+
+
+@app.get("/api/capabilities")
+async def get_capabilities() -> CapabilityResponse:
+    """Expose server capability flags for the frontend handshake."""
+    return CapabilityResponse(lsof_available=LSOF_AVAILABLE)
 
 
 @app.get("/api/browse")
