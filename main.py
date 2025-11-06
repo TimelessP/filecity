@@ -147,7 +147,7 @@ LSOF_ENABLED = LSOF_REQUESTED and LSOF_BINARY_PRESENT
 
 def _is_path_within_root(path: Path) -> bool:
     try:
-        path.resolve().relative_to(ROOT_DIR)
+        path.resolve(strict=False).relative_to(ROOT_DIR)
         return True
     except ValueError:
         return False
@@ -155,6 +155,57 @@ def _is_path_within_root(path: Path) -> bool:
 
 FAVOURITES_FILE = Path("data/favourites.json")
 FAVOURITES_LOCK = Lock()
+
+
+def _normalize_relative_path(value: Optional[str]) -> Path:
+    if value is None:
+        return Path()
+    text = str(value).strip()
+    if text in {"", ".", "./"}:
+        return Path()
+    text = text.replace("\\", "/")
+    if text in {"/", "./", "."}:
+        return Path()
+    if len(text) >= 2 and text[1] == ':' and text[0].isalpha():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if text.startswith("/"):
+        text = text.lstrip("/")
+        if not text:
+            return Path()
+    parts: List[str] = []
+    for part in text.split('/'):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise HTTPException(status_code=403, detail="Access denied")
+            parts.pop()
+        else:
+            parts.append(part)
+    return Path(*parts)
+
+
+def _relative_path_to_string(path: Path) -> str:
+    if not path.parts:
+        return "/"
+    return "/".join(path.parts)
+
+
+def _client_path_to_absolute(value: Optional[str]) -> Path:
+    relative_path = _normalize_relative_path(value)
+    absolute = (ROOT_DIR / relative_path).resolve(strict=False)
+    if not _is_path_within_root(absolute):
+        raise HTTPException(status_code=403, detail="Access outside the configured root directory is denied")
+    return absolute
+
+
+def _absolute_to_client_path(path: Path) -> str:
+    resolved = path.resolve(strict=False)
+    try:
+        relative = resolved.relative_to(ROOT_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="Server path mapping error") from exc
+    return _relative_path_to_string(relative)
 
 
 def ensure_favourites_file() -> None:
@@ -170,9 +221,18 @@ def load_favourites() -> List[str]:
         try:
             with FAVOURITES_FILE.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-                if isinstance(data, list):
-                    return [str(Path(item)) for item in data]
-                return []
+                if not isinstance(data, list):
+                    return []
+                favourites: List[str] = []
+                for item in data:
+                    try:
+                        relative = _normalize_relative_path(str(item))
+                    except HTTPException:
+                        continue
+                    entry = _relative_path_to_string(relative)
+                    if entry not in favourites:
+                        favourites.append(entry)
+                return favourites
         except json.JSONDecodeError:
             return []
 
@@ -180,37 +240,39 @@ def load_favourites() -> List[str]:
 def save_favourites(paths: List[str]) -> None:
     ensure_favourites_file()
     with FAVOURITES_LOCK:
+        sanitized: List[str] = []
+        for path in paths:
+            try:
+                relative = _normalize_relative_path(path)
+            except HTTPException:
+                continue
+            entry = _relative_path_to_string(relative)
+            if entry not in sanitized:
+                sanitized.append(entry)
+        sanitized.sort()
         with FAVOURITES_FILE.open("w", encoding="utf-8") as fh:
-            json.dump(paths, fh, indent=2)
+            json.dump(sanitized, fh, indent=2)
 
 
-def get_safe_path(requested_path: str) -> Path:
+def get_safe_path(requested_path: Optional[str]) -> Path:
     """
     Resolve and validate file path to prevent directory traversal attacks.
     Only allows access to files the current user can access.
     """
-    if not requested_path:
-        requested_path = str(ROOT_DIR)
-    
     try:
-        # Resolve the path and ensure it exists
-        resolved_path = Path(requested_path).expanduser().resolve()
+        resolved_path = _client_path_to_absolute(requested_path)
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {str(exc)}") from exc
 
-        if not _is_path_within_root(resolved_path):
-            raise HTTPException(status_code=403, detail="Access outside the configured root directory is denied")
-        
-        # Basic security: ensure the path exists and is accessible
-        if not resolved_path.exists():
-            raise HTTPException(status_code=404, detail="Path not found")
-        
-        # Check if we have read access
-        if not os.access(resolved_path, os.R_OK):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        return resolved_path
-    
-    except (OSError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid path: {str(e)}")
+    if not resolved_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    if not os.access(resolved_path, os.R_OK):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return resolved_path
 
 
 def get_hex_preview(file_path: Path, max_bytes: int = 256) -> Optional[List[HexLine]]:
@@ -259,7 +321,7 @@ def calculate_log_size(size: int) -> float:
     return normalized
 
 
-def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Path) -> Optional[tuple[str, str]]:
+def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Path) -> Optional[tuple[Path, Path]]:
     """Clean and normalize an lsof path value, restricting it to direct children of directory."""
     if not raw_path:
         return None
@@ -287,7 +349,7 @@ def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Pat
         return None
 
     resolved_str = os.path.realpath(absolute_str)
-    return absolute_str, resolved_str
+    return Path(absolute_str), Path(resolved_str)
 
 
 def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
@@ -338,15 +400,29 @@ def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
             normalized = _normalize_lsof_path(value, directory, directory_resolved)
             if not normalized:
                 continue
-            absolute_str, resolved_str = normalized
+            absolute_path, resolved_path = normalized
+            if not _is_path_within_root(absolute_path.resolve(strict=False)):
+                continue
+            try:
+                client_path = _absolute_to_client_path(absolute_path)
+            except HTTPException:
+                continue
+            resolved_client: Optional[str] = None
+            if _is_path_within_root(resolved_path.resolve(strict=False)):
+                try:
+                    resolved_client = _absolute_to_client_path(resolved_path)
+                except HTTPException:
+                    resolved_client = None
             entry = entries.setdefault(
-                absolute_str,
+                client_path,
                 {
-                    "path": absolute_str,
-                    "resolved_path": resolved_str,
+                    "path": client_path,
+                    "resolved_path": resolved_client,
                     "processes": []
                 }
             )
+            if resolved_client and not entry.get("resolved_path"):
+                entry["resolved_path"] = resolved_client
             processes: List[Dict[str, object]] = entry["processes"]  # type: ignore[assignment]
             if not any(proc.get("pid") == current_pid for proc in processes):
                 processes.append({
@@ -359,10 +435,11 @@ def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
         processes_data = entry["processes"]  # type: ignore[assignment]
         if not processes_data:
             continue
+        resolved_path_value = entry["resolved_path"]
         open_files.append(
             OpenFileEntry(
                 path=str(entry["path"]),
-                resolved_path=str(entry["resolved_path"]),
+                resolved_path=str(resolved_path_value) if resolved_path_value else None,
                 processes=[OpenFileProcess(**proc) for proc in processes_data]
             )
         )
@@ -389,9 +466,7 @@ async def browse_directory(path: str = None) -> DirectoryListing:
     """
     Browse directory contents for 3D visualization
     """
-    if path is None:
-        path = str(ROOT_DIR)
-    
+    relative_path = _normalize_relative_path(path)
     safe_path = get_safe_path(path)
     
     if not safe_path.is_dir():
@@ -404,17 +479,18 @@ async def browse_directory(path: str = None) -> DirectoryListing:
         for item in safe_path.iterdir():
             try:
                 stat_info = item.stat()
+                client_path = _absolute_to_client_path(item)
                 
                 # Get file info
                 file_info = FileInfo(
                     name=item.name,
-                    path=str(item),
+                    path=client_path,
                     is_directory=item.is_dir(),
                     size=stat_info.st_size if not item.is_dir() else 0,
                     modified=stat_info.st_mtime,
                     log_size=calculate_log_size(stat_info.st_size) if not item.is_dir() else 1.0,
                     mime_type=mimetypes.guess_type(str(item))[0] if not item.is_dir() else None,
-                    is_favourite=str(item) in favourite_paths
+                    is_favourite=client_path in favourite_paths
                 )
                 
                 items.append(file_info)
@@ -427,14 +503,14 @@ async def browse_directory(path: str = None) -> DirectoryListing:
         raise HTTPException(status_code=403, detail=f"Cannot access directory: {str(e)}")
     
     # Get parent directory
-    if safe_path == ROOT_DIR:
+    if not relative_path.parts:
         parent = None
     else:
-        potential_parent = safe_path.parent
-        parent = str(potential_parent) if _is_path_within_root(potential_parent) else None
+        parent_path = Path(*relative_path.parts[:-1])
+        parent = _relative_path_to_string(parent_path)
     
     return DirectoryListing(
-        path=str(safe_path),
+        path=_relative_path_to_string(relative_path),
         parent=parent,
         items=items
     )
@@ -443,6 +519,7 @@ async def browse_directory(path: str = None) -> DirectoryListing:
 @app.get("/api/file-hex")
 async def fetch_file_hex(path: str, max_bytes: int = 256) -> HexPreview:
     """Fetch structured hex dump lines for a file"""
+    relative_path = _normalize_relative_path(path)
     safe_path = get_safe_path(path)
 
     if not safe_path.is_file():
@@ -452,7 +529,7 @@ async def fetch_file_hex(path: str, max_bytes: int = 256) -> HexPreview:
     if lines is None:
         raise HTTPException(status_code=404, detail="Unable to read file contents")
 
-    return HexPreview(path=str(safe_path), lines=lines)
+    return HexPreview(path=_relative_path_to_string(relative_path), lines=lines)
 
 
 @app.get("/api/file-preview")
@@ -474,13 +551,15 @@ async def get_favourites() -> List[str]:
 
 @app.post("/api/favourites")
 async def set_favourite(request: FavouriteRequest) -> List[str]:
-    safe_path = str(get_safe_path(request.path))
+    relative_path = _normalize_relative_path(request.path)
+    relative_str = _relative_path_to_string(relative_path)
     favourites = set(load_favourites())
 
     if request.favourite:
-        favourites.add(safe_path)
+        get_safe_path(request.path)
+        favourites.add(relative_str)
     else:
-        favourites.discard(safe_path)
+        favourites.discard(relative_str)
 
     sorted_favs = sorted(favourites)
     save_favourites(sorted_favs)
@@ -489,7 +568,7 @@ async def set_favourite(request: FavouriteRequest) -> List[str]:
 
 @app.get("/api/open-files")
 async def get_open_files(directory: Optional[str] = None) -> List[OpenFileEntry]:
-    target_path = get_safe_path(directory or str(ROOT_DIR))
+    target_path = get_safe_path(directory)
     if not target_path.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
     return list_open_files_for_directory(target_path)
@@ -500,30 +579,38 @@ async def get_file_info(path: str) -> FileInfo:
     """
     Get detailed information about a specific file
     """
+    relative_path = _normalize_relative_path(path)
     safe_path = get_safe_path(path)
-    
+
     try:
         stat_info = safe_path.stat()
-        
         favourite_paths = set(load_favourites())
+        relative_str = _relative_path_to_string(relative_path)
 
+        is_directory = safe_path.is_dir()
+        display_name = safe_path.name
+        if safe_path == ROOT_DIR:
+            display_name = ROOT_DIR.name or "/"
+        if not display_name:
+            display_name = "/"
+
+        mime_type = None if is_directory else mimetypes.guess_type(str(safe_path))[0]
         file_info = FileInfo(
-            name=safe_path.name,
-            path=str(safe_path),
-            is_directory=safe_path.is_dir(),
-            size=stat_info.st_size if not safe_path.is_dir() else 0,
+            name=display_name,
+            path=relative_str,
+            is_directory=is_directory,
+            size=stat_info.st_size if not is_directory else 0,
             modified=stat_info.st_mtime,
-            log_size=calculate_log_size(stat_info.st_size) if not safe_path.is_dir() else 1.0,
-            mime_type=mimetypes.guess_type(str(safe_path))[0] if not safe_path.is_dir() else None,
-            is_favourite=str(safe_path) in favourite_paths
+            log_size=calculate_log_size(stat_info.st_size) if not is_directory else 1.0,
+            mime_type=mime_type,
+            is_favourite=relative_str in favourite_paths
         )
-        
-        # Add hex preview for files
+
         if not safe_path.is_dir():
             file_info.hex_preview = get_hex_preview(safe_path, max_bytes=512)
-        
+
         return file_info
-        
+
     except (OSError, PermissionError) as e:
         raise HTTPException(status_code=403, detail=f"Cannot access file: {str(e)}")
 
