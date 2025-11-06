@@ -55,7 +55,7 @@ class FileCity {
         this.searchMatches = [];
         this.searchIndex = -1;
         this.searchQuery = '';
-        this.sortModes = ['unsorted', 'name', 'date', 'size'];
+    this.sortModes = ['unsorted', 'name', 'date', 'size', 'extension'];
         this.sortModeIndex = 0;
         this.sortAscending = true;
         this.hudCollapsed = false;
@@ -795,13 +795,35 @@ class FileCity {
             return list;
         }
 
+        if (mode === 'extension') {
+            const extKey = (file) => {
+                if (file.is_directory) {
+                    return '';
+                }
+                const name = file.name || '';
+                const lastDot = name.lastIndexOf('.');
+                if (lastDot <= 0 || lastDot === name.length - 1) {
+                    return '';
+                }
+                return name.slice(lastDot + 1).toLowerCase();
+            };
+            list.sort((a, b) => {
+                const extDiff = extKey(a).localeCompare(extKey(b));
+                if (extDiff !== 0) {
+                    return extDiff * direction;
+                }
+                return compareByName(a, b) * direction;
+            });
+            return list;
+        }
+
         return list;
     }
 
     cycleSortMode() {
         this.sortModeIndex = (this.sortModeIndex + 1) % this.sortModes.length;
         const mode = this.getCurrentSortMode();
-        if (mode === 'name' || mode === 'unsorted') {
+        if (mode === 'name' || mode === 'unsorted' || mode === 'extension') {
             this.sortAscending = true;
         } else {
             this.sortAscending = false;
@@ -822,7 +844,8 @@ class FileCity {
         const labelMap = {
             name: 'Name',
             date: 'Modified',
-            size: 'Size'
+            size: 'Size',
+            extension: 'Extension'
         };
         const arrow = this.sortAscending ? '↑' : '↓';
         return `${labelMap[mode] ?? 'Original'} ${arrow}`;
