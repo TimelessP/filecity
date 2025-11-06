@@ -33,10 +33,14 @@ class FileCity {
         this.detailCount = 9; // 3x3 grid of detailed buildings
         this.previewCache = new Map();
         this.pendingPreviewLoads = new Set();
+    this.previewFailureCache = new Map();
+    this.previewRetryDelay = 15000;
         this.previewCubeMaxSize = 2.6;
         this.previewUpdateInterval = 400; // ms
         this.lastPreviewUpdate = 0;
         this.directoryPreviewTexture = null;
+    this.restrictedPreviewTextures = new Map();
+    this.unavailablePreviewTextures = new Map();
 
         // View state stack
         this.viewStack = [];
@@ -65,6 +69,7 @@ class FileCity {
         this.currentStatusText = '';
         this.previousMediaActive = false;
         this.lastStatusUpdate = 0;
+    this.statusMessageTimer = null;
         this.justRequestedPointerLock = false;
         this.gotoModal = null;
         this.gotoInput = null;
@@ -685,10 +690,30 @@ class FileCity {
 
             const url = targetPath ? `/api/browse?path=${encodeURIComponent(targetPath)}` : '/api/browse';
             const response = await fetch(url);
+            if (!response.ok) {
+                let message = `Unable to load directory (HTTP ${response.status})`;
+                try {
+                    const payload = await response.json();
+                    if (payload && typeof payload.detail === 'string') {
+                        message = payload.detail;
+                    }
+                } catch (parseError) {
+                    // ignore parsing errors, keep default message
+                }
+                throw new Error(message);
+            }
+
             const data = await response.json();
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid directory response from server');
+            }
+            if (!Array.isArray(data.items)) {
+                throw new Error('Directory listing missing items collection');
+            }
 
             this.directoryToken += 1;
-            this.currentPath = data.path;
+            const directoryPath = typeof data.path === 'string' && data.path.length ? data.path : (this.currentPath ?? '/');
+            this.currentPath = directoryPath;
             this.allFiles = data.items;
 
             this.previewCache.forEach((texture) => {
@@ -712,6 +737,8 @@ class FileCity {
             this.pendingStackPushPath = null;
         } catch (error) {
             console.error('Failed to load directory:', error);
+            const message = (error && typeof error.message === 'string') ? error.message : 'Unable to load directory';
+            this.showStatusMessage(message, 6000);
             if (this.pendingStackPushPath && targetPath === this.pendingStackPushPath && this.viewStack.length) {
                 this.viewStack.pop();
             }
@@ -894,6 +921,10 @@ class FileCity {
             return;
         }
 
+        if (this.statusMessageTimer && !force) {
+            return;
+        }
+
         const base = `ONLINE · Sort: ${this.describeSortMode()}`;
         const mediaStatus = this.buildMediaStatus();
         const text = mediaStatus ? `${base} · ${mediaStatus}` : base;
@@ -902,6 +933,10 @@ class FileCity {
             this.statusElement.textContent = text;
             this.currentStatusText = text;
             this.lastStatusUpdate = performance.now();
+            if (force && this.statusMessageTimer) {
+                clearTimeout(this.statusMessageTimer);
+                this.statusMessageTimer = null;
+            }
         }
     }
 
@@ -923,6 +958,22 @@ class FileCity {
         }
 
         this.previousMediaActive = mediaActive;
+    }
+
+    showStatusMessage(message, duration = 5000) {
+        if (!this.statusElement) {
+            return;
+        }
+        if (this.statusMessageTimer) {
+            clearTimeout(this.statusMessageTimer);
+        }
+        const text = message || '';
+        this.statusElement.textContent = text;
+        this.currentStatusText = text;
+        this.statusMessageTimer = setTimeout(() => {
+            this.statusMessageTimer = null;
+            this.updateStatusDisplay(true);
+        }, duration);
     }
 
     captureActiveMediaContext() {
@@ -1181,7 +1232,9 @@ class FileCity {
             mediaPaused: false,
             pavementHighlightColor: null,
             pavementHighlightHSL: null,
-            pavementPausedColor: pavement ? new THREE.Color(this.colors.mediaPaused) : null
+            pavementPausedColor: pavement ? new THREE.Color(this.colors.mediaPaused) : null,
+            restrictedPreviewNotified: false,
+            unavailablePreviewNotified: false,
         };
 
         if (file.is_favourite) {
@@ -1655,6 +1708,30 @@ class FileCity {
         data.previewMode = mode;
         const assets = data.previewAssets;
         const key = `${file.path}|${mode}`;
+        const previewAllowed = !file || mode === 'directory' || file.preview_available !== false;
+        const blockedReason = file && typeof file.preview_unavailable_reason === 'string' ? file.preview_unavailable_reason : null;
+
+        const failure = this.previewFailureCache.get(key);
+        if (failure) {
+            if (failure.status === 401 || failure.status === 403) {
+                this.applyRestrictedPreview(building, mode, key, failure.detail || blockedReason);
+                return;
+            }
+            if (failure.status === 400 || failure.status === 404 || failure.status === 410 || failure.status === 415) {
+                this.applyUnavailablePreview(building, mode, key, failure.detail || blockedReason);
+                return;
+            }
+            const now = performance.now();
+            if (now - failure.timestamp < this.previewRetryDelay) {
+                if (!failure.notified) {
+                    this.notifyPreviewFailure(failure, building);
+                    failure.notified = true;
+                }
+                this.removePreviewCube(building);
+                return;
+            }
+            this.previewFailureCache.delete(key);
+        }
 
         if (assets[mode]) {
             this.updatePreviewCube(building, assets[mode]);
@@ -1664,6 +1741,15 @@ class FileCity {
             const texture = this.previewCache.get(key);
             assets[mode] = texture;
             this.updatePreviewCube(building, texture);
+            return;
+        }
+
+        if (!previewAllowed) {
+            if (this.isPermissionReason(blockedReason)) {
+                this.applyRestrictedPreview(building, mode, key, blockedReason);
+            } else {
+                this.applyUnavailablePreview(building, mode, key, blockedReason);
+            }
             return;
         }
 
@@ -1702,63 +1788,342 @@ class FileCity {
         this.pendingPreviewLoads.add(key);
 
         if (mode === 'image') {
-            const imageUrl = this.getFilePreviewUrl(path);
-            if (!imageUrl) {
-                this.pendingPreviewLoads.delete(key);
-                return;
-            }
-            fetch(imageUrl)
-                .then((response) => {
-                    if (!response.ok) {
-                        throw new Error('image preview failed');
-                    }
-                    return response.blob();
-                })
-                .then((blob) => window.createImageBitmap ? window.createImageBitmap(blob) : this.loadImageViaElement(blob))
-                .then((bitmap) => {
-                    this.pendingPreviewLoads.delete(key);
-                    if (!bitmap || !this.isBuildingCurrent(building)) {
-                        return;
-                    }
-                    const texture = this.createImagePreviewTexture(bitmap);
-                    if (texture) {
-                        this.previewCache.set(key, texture);
-                        building.userData.previewAssets[mode] = texture;
-                        if (building.userData.previewMode === mode && building.userData.inFocus) {
-                            this.updatePreviewCube(building, texture);
-                        }
-                    }
-                })
-                .catch(() => {
-                    this.pendingPreviewLoads.delete(key);
-                });
+            this.fetchImagePreview(building, key, mode);
             return;
         }
 
-        fetch(`/api/file-hex?path=${encodeURIComponent(path)}&max_bytes=512`)
-            .then((response) => {
+        this.fetchHexPreview(building, key, mode);
+    }
+
+    applyRestrictedPreview(building, mode, key, reason, options = {}) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const assets = building.userData.previewAssets;
+        const normalizedReason = typeof reason === 'string' && reason.trim().length ? reason.trim() : null;
+        const texture = this.getRestrictedPreviewTexture(normalizedReason);
+        if (!texture) {
+            if (this.isBuildingCurrent(building)) {
+                this.removePreviewCube(building);
+            }
+            return;
+        }
+
+        assets[mode] = texture;
+        if (key) {
+            this.previewCache.set(key, texture);
+            this.previewFailureCache.delete(key);
+        }
+
+        if (building.userData.previewMode === mode && building.userData.inFocus) {
+            this.updatePreviewCube(building, texture);
+        }
+
+        if (options.notify && !building.userData.restrictedPreviewNotified) {
+            const name = building.userData?.fileInfo?.name || 'file';
+            const suffix = normalizedReason ? ` (${normalizedReason})` : '';
+            this.showStatusMessage(`Preview unavailable: ${name}${suffix}`.trim(), 6000);
+            building.userData.restrictedPreviewNotified = true;
+        }
+    }
+
+    applyUnavailablePreview(building, mode, key, reason, options = {}) {
+        if (!building || !building.userData) {
+            return;
+        }
+
+        const assets = building.userData.previewAssets;
+        const normalizedReason = typeof reason === 'string' && reason.trim().length ? reason.trim() : null;
+        const texture = this.getUnavailablePreviewTexture(normalizedReason);
+        if (!texture) {
+            if (this.isBuildingCurrent(building)) {
+                this.removePreviewCube(building);
+            }
+            return;
+        }
+
+        assets[mode] = texture;
+        if (key) {
+            this.previewCache.set(key, texture);
+            this.previewFailureCache.delete(key);
+        }
+
+        if (building.userData.previewMode === mode && building.userData.inFocus) {
+            this.updatePreviewCube(building, texture);
+        }
+
+        if (options.notify && !building.userData.unavailablePreviewNotified) {
+            const name = building.userData?.fileInfo?.name || 'file';
+            const suffix = normalizedReason ? ` (${normalizedReason})` : '';
+            this.showStatusMessage(`Preview unavailable: ${name}${suffix}`.trim(), 6000);
+            building.userData.unavailablePreviewNotified = true;
+        }
+    }
+
+    getUnavailablePreviewTexture(reason) {
+        const key = reason || 'generic';
+        if (this.unavailablePreviewTextures.has(key)) {
+            return this.unavailablePreviewTextures.get(key);
+        }
+
+        const size = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
+        ctx.fillRect(0, 0, size, size);
+        ctx.strokeStyle = 'rgba(128, 128, 128, 0.5)';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(16, 16, size - 32, size - 32);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 64px Orbitron';
+        ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+        ctx.fillText('NO DATA', size / 2, size / 2 - 40);
+
+        if (reason) {
+            const message = reason.length > 42 ? `${reason.slice(0, 39)}...` : reason;
+            ctx.font = '24px Orbitron';
+            ctx.fillStyle = 'rgba(200, 200, 200, 0.85)';
+            ctx.fillText(message, size / 2, size / 2 + 28);
+        }
+
+        const texture = this.canvasToTexture(canvas);
+        if (texture) {
+            this.unavailablePreviewTextures.set(key, texture);
+        }
+        return texture;
+    }
+
+    getRestrictedPreviewTexture(reason) {
+        const key = reason || 'generic';
+        if (this.restrictedPreviewTextures.has(key)) {
+            return this.restrictedPreviewTextures.get(key);
+        }
+
+        const size = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        ctx.fillStyle = 'rgba(40, 0, 0, 0.88)';
+        ctx.fillRect(0, 0, size, size);
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(16, 16, size - 32, size - 32);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 72px Orbitron';
+        ctx.fillStyle = 'rgba(255, 64, 64, 0.95)';
+        ctx.fillText('LOCKED', size / 2, size / 2 - 48);
+
+        if (reason) {
+            const message = reason.length > 42 ? `${reason.slice(0, 39)}...` : reason;
+            ctx.font = '24px Orbitron';
+            ctx.fillStyle = 'rgba(255, 200, 200, 0.9)';
+            ctx.fillText(message, size / 2, size / 2 + 32);
+        }
+
+        const texture = this.canvasToTexture(canvas);
+        if (texture) {
+            this.restrictedPreviewTextures.set(key, texture);
+        }
+        return texture;
+    }
+
+    fetchImagePreview(building, key, mode) {
+        const file = building.userData.fileInfo;
+        const path = file.path;
+        const imageUrl = this.getFilePreviewUrl(path);
+        if (!imageUrl) {
+            this.pendingPreviewLoads.delete(key);
+            return;
+        }
+
+        (async () => {
+            try {
+                const response = await fetch(imageUrl);
                 if (!response.ok) {
-                    throw new Error('hex preview failed');
-                }
-                return response.json();
-            })
-            .then((data) => {
-                this.pendingPreviewLoads.delete(key);
-                if (!data || !Array.isArray(data.lines) || !this.isBuildingCurrent(building)) {
+                    let detail = null;
+                    try {
+                        const payload = await response.json();
+                        if (payload && typeof payload.detail === 'string') {
+                            detail = payload.detail;
+                        }
+                    } catch (_) {
+                        detail = null;
+                    }
+                    this.recordPreviewFailure(key, building, mode, response.status, detail);
                     return;
                 }
-                const texture = this.createHexPreviewTexture(data.lines);
+
+                const blob = await response.blob();
+                const bitmap = await (window.createImageBitmap ? window.createImageBitmap(blob) : this.loadImageViaElement(blob));
+                if (!bitmap || !this.isBuildingCurrent(building)) {
+                    return;
+                }
+                const texture = this.createImagePreviewTexture(bitmap);
                 if (texture) {
+                    this.previewFailureCache.delete(key);
                     this.previewCache.set(key, texture);
                     building.userData.previewAssets[mode] = texture;
                     if (building.userData.previewMode === mode && building.userData.inFocus) {
                         this.updatePreviewCube(building, texture);
                     }
                 }
-            })
-            .catch(() => {
+            } catch (error) {
+                const message = error && typeof error.message === 'string' ? error.message : 'image preview failed';
+                this.recordPreviewFailure(key, building, mode, null, message);
+            } finally {
                 this.pendingPreviewLoads.delete(key);
-            });
+            }
+        })();
+    }
+
+    fetchHexPreview(building, key, mode) {
+        const file = building.userData.fileInfo;
+        const path = file.path;
+
+        (async () => {
+            try {
+                const response = await fetch(`/api/file-hex?path=${encodeURIComponent(path)}&max_bytes=512`);
+                if (!response.ok) {
+                    let detail = null;
+                    try {
+                        const payload = await response.json();
+                        if (payload && typeof payload.detail === 'string') {
+                            detail = payload.detail;
+                        }
+                    } catch (_) {
+                        detail = null;
+                    }
+                    this.recordPreviewFailure(key, building, mode, response.status, detail);
+                    return;
+                }
+
+                const data = await response.json();
+                if (!data || !Array.isArray(data.lines) || !this.isBuildingCurrent(building)) {
+                    return;
+                }
+                const texture = this.createHexPreviewTexture(data.lines);
+                if (texture) {
+                    this.previewFailureCache.delete(key);
+                    this.previewCache.set(key, texture);
+                    building.userData.previewAssets[mode] = texture;
+                    if (building.userData.previewMode === mode && building.userData.inFocus) {
+                        this.updatePreviewCube(building, texture);
+                    }
+                }
+            } catch (error) {
+                const message = error && typeof error.message === 'string' ? error.message : 'hex preview failed';
+                this.recordPreviewFailure(key, building, mode, null, message);
+            } finally {
+                this.pendingPreviewLoads.delete(key);
+            }
+        })();
+    }
+
+    recordPreviewFailure(key, building, mode, status, detail) {
+        const now = performance.now();
+        const file = building?.userData?.fileInfo || {};
+        const normalizedDetail = typeof detail === 'string' && detail.trim().length ? detail.trim() : null;
+        const entry = {
+            key,
+            mode,
+            path: typeof file.path === 'string' ? file.path : '',
+            name: typeof file.name === 'string' ? file.name : '',
+            status: typeof status === 'number' && Number.isFinite(status) ? status : null,
+            detail: normalizedDetail,
+            timestamp: now,
+            notified: false
+        };
+
+        this.previewFailureCache.set(key, entry);
+
+        const isAuthFailure = entry.status === 401 || entry.status === 403;
+        const isUnavailableFailure = entry.status === 400 || entry.status === 404 || entry.status === 410 || entry.status === 415;
+
+        if (isAuthFailure) {
+            if (this.isBuildingCurrent(building)) {
+                this.applyRestrictedPreview(building, mode, key, entry.detail, { notify: false });
+            }
+            entry.notified = true;
+            return;
+        }
+
+        if (isUnavailableFailure) {
+            if (this.isBuildingCurrent(building)) {
+                this.applyUnavailablePreview(building, mode, key, entry.detail || 'No preview available', { notify: false });
+            }
+            entry.notified = true;
+            return;
+        }
+
+        if (building?.userData) {
+            building.userData.previewAssets[mode] = null;
+        }
+
+        if (this.isBuildingCurrent(building)) {
+            this.removePreviewCube(building);
+            this.notifyPreviewFailure(entry, building);
+            entry.notified = true;
+        }
+    }
+
+    notifyPreviewFailure(entry, building) {
+        if (!entry) {
+            return;
+        }
+
+        if (entry.status === 401 || entry.status === 403) {
+            return;
+        }
+
+        const file = building?.userData?.fileInfo || {};
+        const label = this.formatPreviewFailureLabel(entry.path || file.path || entry.name || file.name || 'file');
+        const reasonParts = [];
+        if (entry.status) {
+            reasonParts.push(entry.status.toString());
+        }
+        if (entry.detail) {
+            reasonParts.push(entry.detail);
+        }
+        const reasonSuffix = reasonParts.length ? ` (${reasonParts.join(' · ')})` : '';
+        const message = `Preview blocked: ${label}${reasonSuffix}`;
+        this.showStatusMessage(message, 6000);
+    }
+
+    formatPreviewFailureLabel(value) {
+        if (!value) {
+            return 'file';
+        }
+        const limit = 48;
+        if (value.length <= limit) {
+            return value;
+        }
+        const tailLength = limit - 3;
+        const tail = value.slice(Math.max(0, value.length - tailLength));
+        return `...${tail}`;
+    }
+
+    isPermissionReason(reason) {
+        if (typeof reason !== 'string' || !reason.trim()) {
+            return false;
+        }
+        const lower = reason.toLowerCase();
+        return lower.includes('permission') || lower.includes('denied') || lower.includes('forbidden') || lower.includes('access');
     }
 
     loadImageViaElement(blob) {

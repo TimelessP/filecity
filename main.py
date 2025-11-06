@@ -83,6 +83,8 @@ class FileInfo(BaseModel):
     log_size: float  # log-normalized size for building height
     hex_preview: Optional[List[HexLine]] = None  # Optional detailed preview
     is_favourite: Optional[bool] = False
+    preview_available: bool = True
+    preview_unavailable_reason: Optional[str] = None
 
 
 class DirectoryListing(BaseModel):
@@ -480,6 +482,25 @@ async def browse_directory(path: str = None) -> DirectoryListing:
             try:
                 stat_info = item.stat()
                 client_path = _absolute_to_client_path(item)
+
+                readable = os.access(item, os.R_OK)
+                is_regular_file = item.is_file()
+                preview_available = True
+                preview_unavailable_reason: Optional[str] = None
+                if item.is_dir():
+                    preview_available = True
+                elif not is_regular_file:
+                    preview_available = False
+                    preview_unavailable_reason = "Unsupported file type"
+                elif not readable:
+                    preview_available = False
+                    preview_unavailable_reason = "Permission denied"
+
+                if preview_available and not item.is_dir():
+                    first_segment = client_path.split('/', 1)[0]
+                    if first_segment == "proc":
+                        preview_available = False
+                        preview_unavailable_reason = "Ephemeral process file"
                 
                 # Get file info
                 file_info = FileInfo(
@@ -490,7 +511,9 @@ async def browse_directory(path: str = None) -> DirectoryListing:
                     modified=stat_info.st_mtime,
                     log_size=calculate_log_size(stat_info.st_size) if not item.is_dir() else 1.0,
                     mime_type=mimetypes.guess_type(str(item))[0] if not item.is_dir() else None,
-                    is_favourite=client_path in favourite_paths
+                    is_favourite=client_path in favourite_paths,
+                    preview_available=preview_available,
+                    preview_unavailable_reason=preview_unavailable_reason
                 )
                 
                 items.append(file_info)
