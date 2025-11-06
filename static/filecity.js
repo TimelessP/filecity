@@ -1087,6 +1087,7 @@ class FileCity {
             pavement.userData = pavement.userData || {};
             pavement.userData.retainSharedGeometry = true;
             pavement.userData.retainSharedMaterial = false;
+            pavement.userData.ignoreBuildingSelection = true;
             group.add(pavement);
         }
 
@@ -1100,6 +1101,7 @@ class FileCity {
         const mesh = new THREE.Mesh(geometry, fillMaterial);
         mesh.position.y = height / 2;
         mesh.userData.isBuildingBody = true;
+        mesh.userData.allowBuildingSelection = true;
 
         const edgeMaterial = new THREE.LineBasicMaterial({
             color: this.getEdgeColor(file),
@@ -1885,6 +1887,8 @@ class FileCity {
             cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
             cube.position.set(0, topY, 0);
             cube.renderOrder = 50;
+            cube.userData = cube.userData || {};
+            cube.userData.allowBuildingSelection = true;
             building.add(cube);
             data.previewCube = cube;
         } else {
@@ -2650,6 +2654,15 @@ class FileCity {
         });
     }
 
+    computePreviewAnchor(data = {}) {
+        const height = Number.isFinite(data.height) ? data.height : 3;
+        const cubeSize = Math.max(0.5, Math.min(this.previewCubeMaxSize, height));
+        const gap = 0.2;
+        const centerHeight = height + gap + cubeSize / 2;
+        const topHeight = height + gap + cubeSize;
+        return { cubeSize, centerHeight, topHeight };
+    }
+
     flyCameraToBuilding(building) {
         if (!building || !this.isBuildingCurrent(building)) {
             return;
@@ -2659,20 +2672,22 @@ class FileCity {
         building.getWorldPosition(buildingPos);
         const data = building.userData || {};
         const height = data.height ?? 3;
+        const previewAnchor = this.computePreviewAnchor(data);
 
-        const lookHeight = height * 0.6;
+        const lookHeight = previewAnchor.centerHeight;
         const approachDirection = new THREE.Vector3().subVectors(this.camera.position, buildingPos);
         if (approachDirection.lengthSq() < 1e-6) {
             approachDirection.set(0, 0, 1);
         }
         approachDirection.normalize();
 
-    const spacing = Number.isFinite(this.gridSpacing) ? this.gridSpacing : 8;
-    const desiredDistance = Math.max(3.5, height * 1.35);
-    const spacingLimit = Math.max(3.6, spacing * 0.9);
-    const distance = Math.min(desiredDistance, spacingLimit);
+        const spacing = Number.isFinite(this.gridSpacing) ? this.gridSpacing : 8;
+        const desiredDistance = Math.max(2.4, height * 1.15 + 0.6);
+        const spacingLimit = Math.max(2.6, spacing * 0.72);
+        const distance = Math.min(desiredDistance, spacingLimit);
         const targetPosition = buildingPos.clone().add(approachDirection.multiplyScalar(distance));
-        targetPosition.y = Math.max(targetPosition.y, buildingPos.y + height * 0.75 + 2);
+        const verticalAim = buildingPos.y + previewAnchor.centerHeight + Math.min(1.2, previewAnchor.cubeSize);
+        targetPosition.y = Math.max(targetPosition.y, verticalAim);
 
         this.camera_velocity.set(0, 0, 0);
         this.autopilot = {
@@ -2684,7 +2699,7 @@ class FileCity {
             accel: 0.03,
             speedByDistance: 0.25,
             turnRate: 0.18,
-            tolerance: 0.35
+            tolerance: 0.22
         };
     }
 
@@ -3048,13 +3063,32 @@ class FileCity {
         }
 
         for (const hit of intersects) {
-            let node = hit.object;
-            while (node && !node.userData?.fileInfo) {
-                node = node.parent;
+            let skip = false;
+            let selectable = false;
+            let probe = hit.object;
+            let building = null;
+
+            while (probe) {
+                const data = probe.userData || {};
+                if (data.ignoreBuildingSelection) {
+                    skip = true;
+                    break;
+                }
+                if (data.allowBuildingSelection) {
+                    selectable = true;
+                }
+                if (data.fileInfo) {
+                    building = probe;
+                    break;
+                }
+                probe = probe.parent;
             }
-            if (node && node.userData?.fileInfo) {
-                return node;
+
+            if (skip || !selectable || !building) {
+                continue;
             }
+
+            return building;
         }
         return null;
     }
