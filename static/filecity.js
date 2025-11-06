@@ -86,6 +86,15 @@ class FileCity {
     this.processPollErrorLogged = false;
     this.lastFrameTime = performance.now();
     this.particleSystem = null;
+    this.particleMaterial = null;
+    this.heartTexture = null;
+    this.heartModeActive = false;
+    this.easterEggStage = 0;
+    this.easterEggTimeout = null;
+    this.crosshairElement = null;
+    this.crosshairVisible = true;
+    this.crosshairHideDelay = 10000;
+    this.crosshairHideTimeout = null;
     this.capabilities = {};
     this.processMonitoringEnabled = false;
 
@@ -137,6 +146,7 @@ class FileCity {
         this.initControls();
         this.initGoToModal();
         this.initHUDVisibility();
+    this.initCrosshairInactivity();
         this.updateLoadingProgress(50, "Loading neural interface...");
 
         this.initMedia();
@@ -194,6 +204,7 @@ class FileCity {
                 this.handleModalKeydown(event);
                 return;
             }
+            this.handleEasterEggKeydown(event);
             if (event.code === 'Escape' && this.isPointerLocked) {
                 this.suppressPointerLockResume = true;
                 this.pointerLockWanted = false;
@@ -308,6 +319,7 @@ class FileCity {
                 this.pendingPointerLock = false;
                 this.windowBlurred = false;
                 this.suppressPointerLockResume = false;
+                this.resetCrosshairInactivityTimer();
             } else {
                 this.justRequestedPointerLock = false;
                 if (this.suppressPointerLockResume) {
@@ -323,6 +335,8 @@ class FileCity {
                     }
                 }
                 this.cancelRightClickHold();
+                this.showCrosshair();
+                this.clearCrosshairInactivityTimer();
             }
             this.updatePointerCursor();
         });
@@ -399,6 +413,7 @@ class FileCity {
             if (this.modalActive) {
                 return;
             }
+            this.handleMouseActivity();
             if (!this.isPointerLocked) {
                 return;
             }
@@ -564,6 +579,7 @@ class FileCity {
             blending: THREE.AdditiveBlending
         });
 
+        this.particleMaterial = particleMaterial;
         const particleSystem = new THREE.Points(particles, particleMaterial);
         particleSystem.userData = {
             baseY,
@@ -574,6 +590,10 @@ class FileCity {
         };
         this.particleSystem = particleSystem;
         this.scene.add(particleSystem);
+
+        if (this.heartModeActive) {
+            this.applyHeartParticleStyling();
+        }
     }
 
     ensurePavementAssets() {
@@ -2548,6 +2568,68 @@ class FileCity {
         }
     }
 
+    initCrosshairInactivity() {
+        if (this.crosshairElement && this.crosshairElement instanceof HTMLElement) {
+            this.crosshairElement.style.transition = this.crosshairElement.style.transition || 'opacity 0.35s ease';
+        } else {
+            this.crosshairElement = document.getElementById('crosshair');
+            if (this.crosshairElement) {
+                this.crosshairElement.style.transition = this.crosshairElement.style.transition || 'opacity 0.35s ease';
+            }
+        }
+        this.crosshairVisible = true;
+        this.resetCrosshairInactivityTimer();
+    }
+
+    resetCrosshairInactivityTimer() {
+        if (!this.crosshairElement) {
+            return;
+        }
+        this.showCrosshair();
+        this.clearCrosshairInactivityTimer();
+        if (this.crosshairHideDelay <= 0) {
+            return;
+        }
+        this.crosshairHideTimeout = setTimeout(() => {
+            this.hideCrosshair();
+        }, this.crosshairHideDelay);
+    }
+
+    clearCrosshairInactivityTimer() {
+        if (this.crosshairHideTimeout) {
+            clearTimeout(this.crosshairHideTimeout);
+            this.crosshairHideTimeout = null;
+        }
+    }
+
+    hideCrosshair() {
+        if (!this.crosshairElement) {
+            return;
+        }
+        this.crosshairElement.style.opacity = '0';
+        this.crosshairElement.style.visibility = 'hidden';
+        this.crosshairVisible = false;
+    }
+
+    showCrosshair() {
+        if (!this.crosshairElement) {
+            return;
+        }
+        this.crosshairElement.style.visibility = 'visible';
+        this.crosshairElement.style.opacity = '1';
+        this.crosshairVisible = true;
+    }
+
+    handleMouseActivity() {
+        if (!this.crosshairElement) {
+            return;
+        }
+        if (!this.crosshairVisible) {
+            this.showCrosshair();
+        }
+        this.resetCrosshairInactivityTimer();
+    }
+
     handleModalKeydown(event) {
         if (!this.modalActive) {
             return;
@@ -2652,6 +2734,133 @@ class FileCity {
         ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'KeyQ', 'KeyE'].forEach((code) => {
             this.keys[code] = false;
         });
+    }
+
+    handleEasterEggKeydown(event) {
+        if (!event) {
+            return;
+        }
+        if (event.key === '<') {
+            this.beginEasterEggSequence();
+            return;
+        }
+        if (event.key === '3' && this.easterEggStage === 1) {
+            this.activateHeartEasterEgg();
+            this.resetEasterEggSequence();
+        }
+    }
+
+    beginEasterEggSequence() {
+        this.easterEggStage = 1;
+        if (this.easterEggTimeout) {
+            clearTimeout(this.easterEggTimeout);
+        }
+        this.easterEggTimeout = setTimeout(() => this.resetEasterEggSequence(), 1500);
+    }
+
+    resetEasterEggSequence() {
+        this.easterEggStage = 0;
+        if (this.easterEggTimeout) {
+            clearTimeout(this.easterEggTimeout);
+            this.easterEggTimeout = null;
+        }
+    }
+
+    activateHeartEasterEgg() {
+        this.heartModeActive = true;
+        this.applyHeartParticleStyling();
+        console.info('FileCity: Heart bloom initiated.');
+    }
+
+    applyHeartParticleStyling() {
+        if (!this.particleSystem || !this.particleSystem.geometry) {
+            return;
+        }
+        if (!this.particleMaterial) {
+            return;
+        }
+        if (!this.heartTexture) {
+            this.heartTexture = this.createHeartTexture();
+        }
+        if (!this.heartTexture) {
+            return;
+        }
+
+        const material = this.particleMaterial;
+        material.map = this.heartTexture;
+        material.alphaTest = 0.15;
+        material.transparent = true;
+        material.depthWrite = false;
+        material.opacity = 0.85;
+        material.size = 0.9;
+        material.color.set(0xffffff);
+        material.vertexColors = true;
+        material.needsUpdate = true;
+
+        const colorsAttr = this.particleSystem.geometry.getAttribute('color');
+        if (colorsAttr && colorsAttr.array) {
+            const array = colorsAttr.array;
+            const tempColor = new THREE.Color();
+            for (let i = 0; i < array.length; i += 3) {
+                const color = this.randomHeartColor(tempColor);
+                array[i] = color.r;
+                array[i + 1] = color.g;
+                array[i + 2] = color.b;
+            }
+            colorsAttr.needsUpdate = true;
+        }
+    }
+
+    createHeartTexture() {
+        const size = 128;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        ctx.clearRect(0, 0, size, size);
+        ctx.save();
+        ctx.translate(size / 2, size / 2.4);
+        ctx.scale(size / 40, size / 40);
+        ctx.beginPath();
+        const step = Math.PI / 60;
+        for (let angle = 0; angle <= Math.PI * 2 + step; angle += step) {
+            const x = 16 * Math.pow(Math.sin(angle), 3);
+            const y = -(13 * Math.cos(angle) - 5 * Math.cos(2 * angle) - 2 * Math.cos(3 * angle) - Math.cos(4 * angle));
+            if (angle === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        ctx.closePath();
+        const gradient = ctx.createLinearGradient(-20, -30, 20, 30);
+        gradient.addColorStop(0, 'rgba(255, 105, 180, 1)');
+        gradient.addColorStop(0.5, 'rgba(255, 20, 147, 1)');
+        gradient.addColorStop(1, 'rgba(186, 85, 211, 1)');
+        ctx.fillStyle = gradient;
+        ctx.shadowColor = 'rgba(255, 182, 193, 0.6)';
+        ctx.shadowBlur = 6;
+        ctx.fill();
+        ctx.restore();
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.encoding = THREE.sRGBEncoding;
+        texture.needsUpdate = true;
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearMipMapLinearFilter;
+        return texture;
+    }
+
+    randomHeartColor(target = new THREE.Color()) {
+        const hue = (0.82 + Math.random() * 0.12) % 1;
+        const saturation = 0.6 + Math.random() * 0.3;
+        const lightness = 0.45 + Math.random() * 0.25;
+        target.setHSL(hue, Math.min(1, saturation), Math.min(1, lightness));
+        return target;
     }
 
     computePreviewAnchor(data = {}) {
