@@ -670,6 +670,7 @@ if __name__ == "__main__":
     except ValueError as exc:
         parser.error(str(exc))
 
+    os.environ["FILECITY_ROOT_DIR"] = str(ROOT_DIR)
     HOST = args.host
     PORT = args.port
     RELOAD = args.reload
