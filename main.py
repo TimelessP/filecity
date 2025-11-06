@@ -349,8 +349,6 @@ def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Pat
         return None
     if relative.startswith('..'):
         return None
-    if os.sep in relative:
-        return None
 
     resolved_str = os.path.realpath(absolute_str)
     return Path(absolute_str), Path(resolved_str)
@@ -360,7 +358,7 @@ def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
     """Invoke lsof and return open files directly within the given directory."""
     if not LSOF_ENABLED:
         raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system")
-    command = ["lsof", "-Fpcfn", "+d", str(directory)]
+    command = ["lsof", "-Fpcfn", "+D", str(directory)]
     try:
         result = subprocess.run(
             command,

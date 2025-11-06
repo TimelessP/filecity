@@ -102,6 +102,10 @@ class FileCity {
     this.crosshairHideTimeout = null;
     this.capabilities = {};
     this.processMonitoringEnabled = false;
+        this.processIndicatorStyles = {
+            file: { base: 0xff4a1f, glow: 0xffc266 },
+            directory: { base: 0x9d4dff, glow: 0xe2c6ff }
+        };
 
         // Media/file type helpers
     this.imagePreviewExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'apng', 'tif', 'tiff', 'ico']);
@@ -1371,6 +1375,30 @@ class FileCity {
         return trimmed.length ? trimmed : value;
     }
 
+    combineProcessLists(existing = [], additional = []) {
+        const base = Array.isArray(existing) ? existing.slice() : [];
+        if (!Array.isArray(additional) || !additional.length) {
+            return base;
+        }
+        const seen = new Set();
+        base.forEach((proc) => {
+            if (proc && typeof proc.pid === 'number') {
+                seen.add(proc.pid);
+            }
+        });
+        additional.forEach((proc) => {
+            if (!proc || typeof proc.pid !== 'number') {
+                return;
+            }
+            if (seen.has(proc.pid)) {
+                return;
+            }
+            seen.add(proc.pid);
+            base.push(proc);
+        });
+        return base;
+    }
+
     computeProcessIndicatorMinHeight(building, radius) {
         const data = building?.userData || {};
         const height = typeof data.height === 'number' ? data.height : 0;
@@ -1426,42 +1454,105 @@ class FileCity {
             return;
         }
         const now = performance.now();
+        const normalizedProcessMap = new Map();
+        if (activeMap && typeof activeMap.forEach === 'function') {
+            activeMap.forEach((processes, rawPath) => {
+                if (rawPath === null || rawPath === undefined) {
+                    return;
+                }
+                const normalizedPath = this.stripTrailingSeparators(String(rawPath));
+                if (!normalizedPath) {
+                    return;
+                }
+                const current = normalizedProcessMap.get(normalizedPath) || [];
+                const merged = this.combineProcessLists(current, Array.isArray(processes) ? processes : []);
+                normalizedProcessMap.set(normalizedPath, merged);
+            });
+        }
+
+        const directoryPaths = new Set();
+        this.buildings.forEach((building) => {
+            const info = building?.userData?.fileInfo;
+            if (!info || !info.path || !info.is_directory) {
+                return;
+            }
+            directoryPaths.add(this.stripTrailingSeparators(info.path));
+        });
+
+        const directoryAccumulator = new Map();
+        const accumulateDirectoryProcesses = (dirPath, processes) => {
+            if (!dirPath || !directoryPaths.has(dirPath)) {
+                return;
+            }
+            if (!Array.isArray(processes) || !processes.length) {
+                return;
+            }
+            const existing = directoryAccumulator.get(dirPath) || [];
+            const merged = this.combineProcessLists(existing, processes);
+            directoryAccumulator.set(dirPath, merged);
+        };
+
+        normalizedProcessMap.forEach((processes, path) => {
+            if (!Array.isArray(processes) || !processes.length) {
+                return;
+            }
+            let cursor = path;
+            while (cursor) {
+                accumulateDirectoryProcesses(cursor, processes);
+                const idx = cursor.lastIndexOf('/');
+                if (idx === -1) {
+                    break;
+                }
+                cursor = cursor.slice(0, idx);
+            }
+        });
+
         this.buildings.forEach((building) => {
             const data = building.userData;
-            if (!data || !data.fileInfo || data.fileInfo.is_directory) {
+            if (!data || !data.fileInfo || !data.fileInfo.path) {
                 if (data?.processIndicator) {
                     this.removeProcessIndicator(building);
                 }
                 return;
             }
-            const path = data.fileInfo.path ? this.stripTrailingSeparators(data.fileInfo.path) : null;
-            const processes = path ? activeMap.get(path) || activeMap.get(this.stripTrailingSeparators(path)) : null;
+            const info = data.fileInfo;
+            const path = this.stripTrailingSeparators(info.path);
+            let processes = null;
+            let indicatorKind = 'file';
+            if (info.is_directory) {
+                indicatorKind = 'directory';
+                processes = path ? directoryAccumulator.get(path) : null;
+            } else {
+                processes = path ? normalizedProcessMap.get(path) : null;
+            }
             if (processes && processes.length) {
-                this.ensureProcessIndicator(building, processes, now);
+                this.ensureProcessIndicator(building, processes, now, indicatorKind);
             } else if (data.processIndicator) {
                 this.removeProcessIndicator(building);
             }
         });
     }
 
-    ensureProcessIndicator(building, processes, now = performance.now()) {
+    ensureProcessIndicator(building, processes, now = performance.now(), kind = 'file') {
         const data = building.userData;
         let indicator = data.processIndicator;
         if (!indicator) {
-            indicator = this.createProcessIndicator(building);
+            indicator = this.createProcessIndicator(building, kind);
             data.processIndicator = indicator;
+        } else if (indicator.kind !== kind) {
+            this.applyProcessIndicatorStyle(indicator, kind);
         }
         indicator.radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
         indicator.verticalRange = this.computeProcessIndicatorVerticalRange(building);
         this.refreshProcessIndicatorConstraints(building, indicator, now);
-        indicator.processes = processes;
+    indicator.processes = Array.isArray(processes) ? processes.slice() : [];
         indicator.lastActive = now;
         if (!indicator.initialized) {
             indicator.initialized = true;
         }
     }
 
-    createProcessIndicator(building) {
+    createProcessIndicator(building, kind = 'file') {
         const data = building.userData;
         const radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
         const size = Math.max(0.4, Math.min(1.2, (data.baseSize ?? 2.4) * 0.3));
@@ -1475,8 +1566,9 @@ class FileCity {
         });
         const mesh = new THREE.Mesh(geometry, fillMaterial);
 
+    const styles = this.processIndicatorStyles?.[kind] || this.processIndicatorStyles?.file || { base: 0xff4a1f, glow: 0xffc266 };
         const edgeMaterial = new THREE.LineBasicMaterial({
-            color: 0xff4a1f,
+            color: styles.base,
             transparent: true,
             opacity: 0.85,
             linewidth: 1.2,
@@ -1501,7 +1593,7 @@ class FileCity {
 
         const now = performance.now();
 
-        return {
+        const indicator = {
             group,
             mesh,
             edges,
@@ -1520,9 +1612,36 @@ class FileCity {
             pulseOffset: Math.random() * Math.PI * 2,
             initialized: false,
             lastActive: now,
-            edgeBaseColor: new THREE.Color(0xff4a1f),
-            edgeGlowColor: new THREE.Color(0xffc266)
+            edgeBaseColor: new THREE.Color(styles.base),
+            edgeGlowColor: new THREE.Color(styles.glow),
+            kind
         };
+        this.applyProcessIndicatorStyle(indicator, kind);
+        return indicator;
+    }
+
+    applyProcessIndicatorStyle(indicator, kind = 'file') {
+        const styles = this.processIndicatorStyles?.[kind] || this.processIndicatorStyles?.file || { base: 0xff4a1f, glow: 0xffc266 };
+        indicator.kind = kind;
+        if (indicator.edgeBaseColor) {
+            indicator.edgeBaseColor.setHex(styles.base);
+        } else {
+            indicator.edgeBaseColor = new THREE.Color(styles.base);
+        }
+        if (indicator.edgeGlowColor) {
+            indicator.edgeGlowColor.setHex(styles.glow);
+        } else {
+            indicator.edgeGlowColor = new THREE.Color(styles.glow);
+        }
+        const edgeMaterial = indicator.edges?.material;
+        if (edgeMaterial && edgeMaterial.color) {
+            edgeMaterial.color.setHex(styles.base);
+        }
+        const meshMaterial = indicator.mesh?.material;
+        if (meshMaterial && meshMaterial.color && typeof meshMaterial.color.setHex === 'function') {
+            meshMaterial.color.setHex(0x000000);
+        }
+        return indicator;
     }
 
     removeProcessIndicator(building, quiet = false) {
