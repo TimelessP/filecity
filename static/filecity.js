@@ -209,6 +209,9 @@ class FileCity {
                 this.handleModalKeydown(event);
                 return;
             }
+            if (this.shouldSuppressBrowserShortcut(event)) {
+                event.preventDefault();
+            }
             this.handleEasterEggKeydown(event);
             if (event.code === 'Escape' && this.isPointerLocked) {
                 this.suppressPointerLockResume = true;
@@ -245,9 +248,11 @@ class FileCity {
                 this.handleModalKeyup(event);
                 return;
             }
+            if (this.shouldSuppressBrowserShortcut(event)) {
+                event.preventDefault();
+            }
             this.keys[event.code] = false;
         });
-
         document.addEventListener('keydown', (event) => {
             if (this.modalActive) {
                 return;
@@ -472,6 +477,19 @@ class FileCity {
                 this.handleFileInteraction(building);
             }
         });
+    }
+
+    shouldSuppressBrowserShortcut(event) {
+        if (!event) {
+            return false;
+        }
+        if (!this.isPointerLocked) {
+            return false;
+        }
+        if (event.altKey) {
+            return false;
+        }
+        return !!(event.ctrlKey || event.metaKey);
     }
 
     initMedia() {

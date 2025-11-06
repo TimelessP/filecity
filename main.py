@@ -203,10 +203,12 @@ def _client_path_to_absolute(value: Optional[str]) -> Path:
 
 def _absolute_to_client_path(path: Path) -> str:
     resolved = path.resolve(strict=False)
+    if not _is_path_within_root(resolved):
+        raise HTTPException(status_code=403, detail="Access outside the configured root directory is denied")
     try:
         relative = resolved.relative_to(ROOT_DIR)
     except ValueError as exc:
-        raise HTTPException(status_code=500, detail="Server path mapping error") from exc
+        raise HTTPException(status_code=403, detail="Access outside the configured root directory is denied") from exc
     return _relative_path_to_string(relative)
 
 
@@ -481,7 +483,12 @@ async def browse_directory(path: str = None) -> DirectoryListing:
         for item in safe_path.iterdir():
             try:
                 stat_info = item.stat()
-                client_path = _absolute_to_client_path(item)
+                try:
+                    client_path = _absolute_to_client_path(item)
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        continue
+                    raise
 
                 readable = os.access(item, os.R_OK)
                 is_regular_file = item.is_file()
