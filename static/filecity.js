@@ -192,8 +192,11 @@ class FileCity {
 
         this.renderer = new THREE.WebGLRenderer({ antialias: true });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = false;
+    this.renderer.outputEncoding = THREE.sRGBEncoding;
+    this.renderer.toneMapping = THREE.NoToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.physicallyCorrectLights = false;
         document.body.appendChild(this.renderer.domElement);
 
         window.addEventListener('resize', () => {
@@ -509,6 +512,16 @@ class FileCity {
         this.videoCanvas.width = 512;
         this.videoCanvas.height = 512;
         this.videoCanvasCtx = this.videoCanvas.getContext('2d');
+        if (this.videoCanvasCtx) {
+            this.videoCanvasCtx.globalCompositeOperation = 'source-over';
+            this.videoCanvasCtx.globalAlpha = 1;
+            this.videoCanvasCtx.shadowBlur = 0;
+            this.videoCanvasCtx.shadowColor = 'rgba(0,0,0,0)';
+            this.videoCanvasCtx.filter = 'none';
+            if (typeof this.videoCanvasCtx.imageSmoothingEnabled === 'boolean') {
+                this.videoCanvasCtx.imageSmoothingEnabled = true;
+            }
+        }
         this.videoCanvasTexture = new THREE.CanvasTexture(this.videoCanvas);
         this.videoCanvasTexture.encoding = THREE.sRGBEncoding;
         this.videoCanvasTexture.needsUpdate = false;
@@ -538,9 +551,6 @@ class FileCity {
     }
 
     createScene() {
-        const ambientLight = new THREE.AmbientLight(0x001122, 0.3);
-        this.scene.add(ambientLight);
-
         this.createNeonGrid();
         this.createParticleSystem();
     }
@@ -2757,6 +2767,14 @@ class FileCity {
         } = options;
 
         ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+        ctx.shadowColor = 'rgba(0,0,0,0)';
+        ctx.filter = 'none';
+        if (typeof ctx.imageSmoothingEnabled === 'boolean') {
+            ctx.imageSmoothingEnabled = true;
+        }
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         if (background) {
             ctx.fillStyle = background;
