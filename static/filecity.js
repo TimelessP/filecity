@@ -3972,9 +3972,6 @@ class FileCity {
     }
 
     toggleHidden() {
-        if (this.activeMedia) {
-            this.stopMedia();
-        }
         this.showHidden = !this.showHidden;
         this.applyFileFilter();
     }
