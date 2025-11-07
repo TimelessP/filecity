@@ -121,6 +121,7 @@ class FileCity {
         this.videoCanvasCtx = null;
         this.videoCanvasTexture = null;
         this.mediaBuilding = null;
+    this.mediaFileInfo = null;
         this.pendingVideoHandlers = null;
 
         // Raycasting
@@ -712,9 +713,14 @@ class FileCity {
 
     async loadDirectory(path = null) {
         const targetPath = path ?? null;
+        const audioContext = this.activeMedia === 'audio' ? this.captureActiveMediaContext() : null;
         try {
             this.cancelRightClickHold();
-            this.stopMedia();
+            if (this.activeMedia === 'audio') {
+                this.detachMediaBuilding();
+            } else {
+                this.stopMedia();
+            }
 
             const url = targetPath ? `/api/browse?path=${encodeURIComponent(targetPath)}` : '/api/browse';
             const response = await fetch(url);
@@ -767,6 +773,9 @@ class FileCity {
             console.error('Failed to load directory:', error);
             const message = (error && typeof error.message === 'string') ? error.message : 'Unable to load directory';
             this.showStatusMessage(message, 6000);
+            if (audioContext) {
+                this.restoreActiveMedia(audioContext);
+            }
             if (this.pendingStackPushPath && targetPath === this.pendingStackPushPath && this.viewStack.length) {
                 this.viewStack.pop();
             }
@@ -911,11 +920,14 @@ class FileCity {
     }
 
     buildMediaStatus() {
-        if (!this.activeMedia || !this.mediaBuilding || !this.mediaBuilding.userData?.fileInfo) {
+        if (!this.activeMedia) {
             return '';
         }
 
-        const fileInfo = this.mediaBuilding.userData.fileInfo;
+        const fileInfo = (this.mediaBuilding?.userData?.fileInfo) || this.mediaFileInfo;
+        if (!fileInfo) {
+            return '';
+        }
         const element = this.activeMedia === 'audio' ? this.audioElement : this.videoElement;
         if (!element) {
             return `${this.activeMedia === 'video' ? 'Video' : 'Audio'}: ${fileInfo.name}`;
@@ -1005,16 +1017,21 @@ class FileCity {
     }
 
     captureActiveMediaContext() {
-        if (!this.activeMedia || !this.mediaBuilding || !this.mediaBuilding.userData?.fileInfo) {
+        if (!this.activeMedia) {
             return null;
         }
-        const path = this.mediaBuilding.userData.fileInfo.path;
+        const fileInfo = (this.mediaBuilding?.userData?.fileInfo) || this.mediaFileInfo;
+        if (!fileInfo || !fileInfo.path) {
+            return null;
+        }
+        const path = fileInfo.path;
         if (!path) {
             return null;
         }
         const context = {
             type: this.activeMedia,
             path,
+            name: fileInfo.name ?? path,
             paused: false
         };
         if (this.activeMedia === 'audio' && this.audioElement) {
@@ -1030,22 +1047,25 @@ class FileCity {
             return;
         }
         const building = this.buildings.find((candidate) => candidate?.userData?.fileInfo?.path === context.path);
-        if (!building) {
-            this.stopMedia();
-            return;
-        }
-
-        this.mediaBuilding = building;
-        const data = building.userData;
-        data.currentMedia = context.type;
+        const fileInfo = building?.userData?.fileInfo;
 
         if (context.type === 'audio') {
-            data.previewMode = data.previewMode === 'video' ? null : data.previewMode;
-            this.setBuildingMediaState(building, true, context.paused);
+            this.mediaBuilding = building || null;
+            this.mediaFileInfo = fileInfo || {
+                path: context.path,
+                name: context.name ?? context.path,
+                is_directory: false,
+                mime_type: null
+            };
+            if (building && building.userData) {
+                building.userData.currentMedia = 'audio';
+                building.userData.previewMode = building.userData.previewMode === 'video' ? null : building.userData.previewMode;
+                this.setBuildingMediaState(building, true, context.paused);
+            }
             if (this.audioElement) {
-                if (context.paused) {
+                if (context.paused && !this.audioElement.paused) {
                     this.audioElement.pause();
-                } else {
+                } else if (!context.paused && this.audioElement.paused) {
                     this.audioElement.play().catch(() => {});
                 }
             }
@@ -1054,14 +1074,34 @@ class FileCity {
             return;
         }
 
+        if (!building) {
+            this.stopMedia();
+            return;
+        }
+
+        this.mediaBuilding = building;
+        this.mediaFileInfo = fileInfo ? {
+            path: fileInfo.path,
+            name: fileInfo.name,
+            is_directory: !!fileInfo.is_directory,
+            mime_type: fileInfo.mime_type ?? null
+        } : {
+            path: context.path,
+            name: context.name ?? context.path,
+            is_directory: false,
+            mime_type: null
+        };
+        const data = building.userData;
+        data.currentMedia = context.type;
+
         if (context.type === 'video') {
             data.previewMode = 'video';
             this.setBuildingMediaState(building, true, context.paused);
             this.ensurePreviewForBuilding(building);
             if (this.videoElement) {
-                if (context.paused) {
+                if (context.paused && !this.videoElement.paused) {
                     this.videoElement.pause();
-                } else {
+                } else if (!context.paused && this.videoElement.paused) {
                     this.videoElement.play().catch(() => {});
                 }
             }
@@ -2849,6 +2889,12 @@ class FileCity {
         this.audioElement.play().catch(() => {});
         this.activeMedia = 'audio';
         this.mediaBuilding = building;
+        this.mediaFileInfo = {
+            path: file.path,
+            name: file.name,
+            is_directory: !!file.is_directory,
+            mime_type: file.mime_type ?? null
+        };
     this.setBuildingMediaState(building, true, false);
         this.updateStatusDisplay(true);
     }
@@ -2870,6 +2916,12 @@ class FileCity {
             building.userData.previewMode = 'video';
             this.mediaBuilding = building;
             this.activeMedia = 'video';
+            this.mediaFileInfo = {
+                path: file.path,
+                name: file.name,
+                is_directory: !!file.is_directory,
+                mime_type: file.mime_type ?? null
+            };
             this.setBuildingMediaState(building, true, false);
             this.ensurePreviewForBuilding(building);
             this.updateVideoFrame(true);
@@ -2924,8 +2976,28 @@ class FileCity {
         this.updatePreviewCube(this.mediaBuilding, this.videoCanvasTexture);
     }
 
+    detachMediaBuilding() {
+        const building = this.mediaBuilding;
+        if (!building) {
+            this.mediaBuilding = null;
+            return;
+        }
+
+        if (building.userData) {
+            building.userData.currentMedia = null;
+            building.userData.previewMode = null;
+            if (building.userData.inFocus) {
+                this.ensurePreviewForBuilding(building);
+            } else {
+                this.removePreviewCube(building);
+            }
+        }
+
+        this.setBuildingMediaState(building, false);
+        this.mediaBuilding = null;
+    }
+
     stopMedia() {
-        const activeBuilding = this.mediaBuilding;
         if (this.activeMedia === 'audio' && this.audioElement) {
             this.audioElement.pause();
             this.audioElement.src = '';
@@ -2939,23 +3011,9 @@ class FileCity {
             this.videoElement.pause();
             this.videoElement.src = '';
         }
-
-        if (activeBuilding && activeBuilding.userData) {
-            activeBuilding.userData.currentMedia = null;
-            activeBuilding.userData.previewMode = null;
-            if (activeBuilding.userData.inFocus) {
-                this.ensurePreviewForBuilding(activeBuilding);
-            } else {
-                this.removePreviewCube(activeBuilding);
-            }
-        }
-
-        if (activeBuilding) {
-            this.setBuildingMediaState(activeBuilding, false);
-        }
-
+        this.detachMediaBuilding();
         this.activeMedia = null;
-        this.mediaBuilding = null;
+        this.mediaFileInfo = null;
         this.updateStatusDisplay(true);
     }
 
