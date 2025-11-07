@@ -1346,8 +1346,16 @@ class FileCity {
                         if (!normalized) {
                             return;
                         }
-                        const entryInfo = nextMap.get(normalized) || { direct: [], aggregate: [] };
+                        const entryInfo = nextMap.get(normalized) || this.createProcessActivityInfo();
                         entryInfo.direct = this.mergeProcessLists(entryInfo.direct, processes);
+                        if (processes.length) {
+                            const isSpecial = this.isProcessEntrySpecial(entry);
+                            if (isSpecial) {
+                                entryInfo.meta.directSpecialCount += 1;
+                            } else {
+                                entryInfo.meta.directNormalCount += 1;
+                            }
+                        }
                         nextMap.set(normalized, entryInfo);
                     });
                 });
@@ -1364,8 +1372,13 @@ class FileCity {
                     if (!parentPath) {
                         continue;
                     }
-                    const parentInfo = nextMap.get(parentPath) || { direct: [], aggregate: [] };
+                    const parentInfo = nextMap.get(parentPath) || this.createProcessActivityInfo();
                     parentInfo.aggregate = this.mergeProcessLists(parentInfo.aggregate, info.direct);
+                    const meta = info.meta || {};
+                    const childAggregateSpecial = (meta.aggregateSpecialCount ?? 0) + (meta.directSpecialCount ?? 0);
+                    const childAggregateNormal = (meta.aggregateNormalCount ?? 0) + (meta.directNormalCount ?? 0);
+                    parentInfo.meta.aggregateSpecialCount += childAggregateSpecial;
+                    parentInfo.meta.aggregateNormalCount += childAggregateNormal;
                     nextMap.set(parentPath, parentInfo);
                 }
             });
@@ -1381,6 +1394,37 @@ class FileCity {
         }
         this.activeProcessMap = nextMap;
         this.updateProcessIndicatorAssignments(this.activeProcessMap);
+    }
+
+    createProcessActivityInfo() {
+        return {
+            direct: [],
+            aggregate: [],
+            meta: {
+                directSpecialCount: 0,
+                directNormalCount: 0,
+                aggregateSpecialCount: 0,
+                aggregateNormalCount: 0
+            }
+        };
+    }
+
+    isProcessEntrySpecial(entry) {
+        if (!entry) {
+            return false;
+        }
+        const candidates = [];
+        if (typeof entry.path === 'string') {
+            candidates.push(entry.path);
+        }
+        if (typeof entry.resolved_path === 'string') {
+            candidates.push(entry.resolved_path);
+        }
+        return candidates.some((value) => {
+            const segments = String(value).split('/');
+            const leaf = segments[segments.length - 1] || '';
+            return /^\*:[0-9]+$/.test(leaf.trim());
+        });
     }
 
     mergeProcessLists(existing = [], incoming = []) {
@@ -1484,10 +1528,42 @@ class FileCity {
             const fileInfo = data.fileInfo;
             const path = fileInfo.path ? this.stripTrailingSeparators(fileInfo.path) : null;
             const entry = path ? map.get(path) : null;
-            const processes = entry ? (fileInfo.is_directory ? entry.aggregate : entry.direct) : null;
-            const hasActivity = Array.isArray(processes) && processes.length > 0;
-            if (hasActivity) {
-                const variant = fileInfo.is_directory ? 'directory' : 'file';
+            const meta = entry?.meta || {};
+            const aggregateSpecialCount = meta.aggregateSpecialCount ?? 0;
+            const aggregateNormalCount = meta.aggregateNormalCount ?? 0;
+            const directSpecialCount = meta.directSpecialCount ?? 0;
+            const directNormalCount = meta.directNormalCount ?? 0;
+            let processes = null;
+            let variant = 'file';
+            if (entry) {
+                if (fileInfo.is_directory) {
+                    const aggregate = Array.isArray(entry.aggregate) ? entry.aggregate : [];
+                    const direct = Array.isArray(entry.direct) ? entry.direct : [];
+                    if (aggregate.length) {
+                        processes = aggregate;
+                        const hasNormal = aggregateNormalCount > 0;
+                        const hasSpecial = aggregateSpecialCount > 0;
+                        const hasSpecialOnly = hasSpecial && !hasNormal;
+                        variant = hasSpecialOnly ? 'directorySelf' : 'directory';
+                    } else if (direct.length) {
+                        processes = direct;
+                        const hasDescendantData = (aggregateSpecialCount + aggregateNormalCount) > 0;
+                        if (!hasDescendantData) {
+                            variant = 'directorySelf';
+                        } else {
+                            const directHasNormal = directNormalCount > 0;
+                            variant = directHasNormal ? 'directory' : 'directorySelf';
+                        }
+                    }
+                } else {
+                    const direct = Array.isArray(entry.direct) ? entry.direct : [];
+                    if (direct.length) {
+                        processes = direct;
+                        variant = 'file';
+                    }
+                }
+            }
+            if (Array.isArray(processes) && processes.length > 0) {
                 this.ensureProcessIndicator(building, processes, now, { variant });
             } else if (data.processIndicator) {
                 this.removeProcessIndicator(building);
@@ -1523,9 +1599,14 @@ class FileCity {
         const size = Math.max(0.4, Math.min(1.2, (data.baseSize ?? 2.4) * 0.3));
 
         const variant = options.variant || 'file';
-        const isDirectoryVariant = variant === 'directory';
-        const edgeBaseHex = isDirectoryVariant ? 0x9c4dff : 0xff4a1f;
-        const edgeGlowHex = isDirectoryVariant ? 0xe2c4ff : 0xffc266;
+        const variantPalette = {
+            file: { edgeBase: 0xff4a1f, edgeGlow: 0xffc266 },
+            directory: { edgeBase: 0x9c4dff, edgeGlow: 0xe2c4ff },
+            directorySelf: { edgeBase: 0x3fd46a, edgeGlow: 0xa8ffce }
+        };
+        const palette = variantPalette[variant] || variantPalette.file;
+        const edgeBaseHex = palette.edgeBase;
+        const edgeGlowHex = palette.edgeGlow;
 
         const geometry = new THREE.DodecahedronGeometry(size);
         const fillMaterial = new THREE.MeshBasicMaterial({
@@ -1537,7 +1618,7 @@ class FileCity {
         const mesh = new THREE.Mesh(geometry, fillMaterial);
 
         const edgeMaterial = new THREE.LineBasicMaterial({
-            color: 0xff4a1f,
+            color: edgeBaseHex,
             transparent: true,
             opacity: 0.85,
             linewidth: 1.2,

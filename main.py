@@ -264,8 +264,6 @@ class LsofMonitor:
                 abs_path = abs_path.resolve(strict=False)
             except OSError:
                 continue
-            if abs_path.is_dir():
-                continue
             if not _is_path_within_root(abs_path):
                 continue
             try:
