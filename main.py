@@ -10,7 +10,7 @@ import math
 import mimetypes
 import shutil
 import subprocess
-from threading import Lock
+from threading import Lock, Thread, Event
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -145,6 +145,191 @@ RELOAD = _env_bool("FILECITY_RELOAD", True)
 LSOF_REQUESTED = _env_bool("FILECITY_LSOF_ENABLED", True)
 LSOF_BINARY_PRESENT = shutil.which("lsof") is not None
 LSOF_ENABLED = LSOF_REQUESTED and LSOF_BINARY_PRESENT
+
+PROCESS_MONITOR_LOCK = Lock()
+PROCESS_MONITOR = None
+
+
+@app.on_event("startup")
+async def _startup_monitor() -> None:
+    ensure_process_monitor()
+
+
+@app.on_event("shutdown")
+async def _shutdown_monitor() -> None:
+    stop_process_monitor()
+
+
+class LsofMonitor:
+    """Background task that periodically snapshots lsof output for the configured root."""
+
+    def __init__(self, root: Path, interval: float = 2.0) -> None:
+        self.root = root
+        self.interval = max(0.5, float(interval))
+        self._lock = Lock()
+        self._stop_event = Event()
+        self._thread: Optional[Thread] = None
+        self._snapshot: Dict[str, OpenFileEntry] = {}
+        self._last_warning_emitted = False
+
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def start(self) -> None:
+        if self.is_running():
+            return
+        self._stop_event.clear()
+        thread = Thread(target=self._run, name="FileCityLsofMonitor", daemon=True)
+        self._thread = thread
+        thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread:
+            thread.join(timeout=1.5)
+        self._thread = None
+        with self._lock:
+            self._snapshot = {}
+        self._last_warning_emitted = False
+
+    def snapshot(self) -> Dict[str, OpenFileEntry]:
+        with self._lock:
+            return {path: entry.copy(deep=True) for path, entry in self._snapshot.items()}
+
+    def get_entries_for_directory(self, directory: Path) -> List[OpenFileEntry]:
+        target_relative = _absolute_to_client_path(directory)
+        snapshot = self.snapshot()
+        if target_relative == '/':
+            prefix = ''
+        else:
+            prefix = f"{target_relative.rstrip('/')}/"
+        selection: List[OpenFileEntry] = []
+        for path, entry in snapshot.items():
+            if path == target_relative or path.startswith(prefix):
+                selection.append(entry.copy(deep=True))
+        selection.sort(key=lambda item: item.path.lower())
+        return selection
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            snapshot = self._collect_snapshot()
+            if snapshot is not None:
+                with self._lock:
+                    self._snapshot = snapshot
+            if self._stop_event.wait(self.interval):
+                break
+
+    def _collect_snapshot(self) -> Optional[Dict[str, OpenFileEntry]]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-Fn"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5
+            )
+        except FileNotFoundError:
+            if not self._last_warning_emitted:
+                print("Warning: lsof not found; disabling process monitoring cache.")
+                self._last_warning_emitted = True
+            return {}
+        except subprocess.TimeoutExpired:
+            if not self._last_warning_emitted:
+                print("Warning: lsof timed out while collecting open files.")
+                self._last_warning_emitted = True
+            return None
+
+        if result.returncode not in (0, 1):
+            if not self._last_warning_emitted:
+                detail = result.stderr.strip() or f"lsof exited with code {result.returncode}"
+                print(f"Warning: {detail}")
+                self._last_warning_emitted = True
+            return None
+
+        if self._last_warning_emitted:
+            self._last_warning_emitted = False
+
+        entries: Dict[str, Dict[str, Optional[str]]] = {}
+
+        for line in result.stdout.splitlines():
+            if not line or not line.startswith('n'):
+                continue
+            raw_path = line[1:].strip()
+            if not raw_path:
+                continue
+            abs_path = Path(raw_path)
+            try:
+                abs_path = abs_path.resolve(strict=False)
+            except OSError:
+                continue
+            if abs_path.is_dir():
+                continue
+            if not _is_path_within_root(abs_path):
+                continue
+            try:
+                client_path = _absolute_to_client_path(abs_path)
+            except HTTPException:
+                continue
+
+            resolved_path = abs_path
+            try:
+                resolved_path = abs_path.resolve(strict=False)
+            except OSError:
+                resolved_path = abs_path
+            resolved_client: Optional[str] = None
+            if _is_path_within_root(resolved_path):
+                try:
+                    resolved_client = _absolute_to_client_path(resolved_path)
+                except HTTPException:
+                    resolved_client = None
+
+            slot = entries.setdefault(client_path, {"resolved_path": resolved_client})
+            if resolved_client and not slot.get("resolved_path"):
+                slot["resolved_path"] = resolved_client
+
+        snapshot: Dict[str, OpenFileEntry] = {}
+        for client_path, info in entries.items():
+            process = OpenFileProcess(pid=-1, command="")
+            snapshot[client_path] = OpenFileEntry(
+                path=client_path,
+                resolved_path=info.get("resolved_path"),
+                processes=[process]
+            )
+
+        return snapshot
+
+
+def ensure_process_monitor() -> Optional[LsofMonitor]:
+    """Create or reuse the background lsof monitor when process tracking is enabled."""
+    global PROCESS_MONITOR
+    if not LSOF_ENABLED:
+        return None
+
+    monitor = PROCESS_MONITOR
+    if monitor and monitor.is_running():
+        return monitor
+
+    with PROCESS_MONITOR_LOCK:
+        monitor = PROCESS_MONITOR
+        if monitor is None:
+            monitor = LsofMonitor(ROOT_DIR)
+            PROCESS_MONITOR = monitor
+        monitor.start()
+        return monitor
+
+
+def get_process_monitor() -> Optional[LsofMonitor]:
+    return PROCESS_MONITOR
+
+
+def stop_process_monitor() -> None:
+    global PROCESS_MONITOR
+    monitor = PROCESS_MONITOR
+    if monitor:
+        monitor.stop()
+    PROCESS_MONITOR = None
 
 
 def _is_path_within_root(path: Path) -> bool:
@@ -325,132 +510,13 @@ def calculate_log_size(size: int) -> float:
     return normalized
 
 
-def _normalize_lsof_path(raw_path: str, directory: Path, directory_resolved: Path) -> Optional[tuple[Path, Path]]:
-    """Clean and normalize an lsof path value, restricting it to direct children of directory."""
-    if not raw_path:
-        return None
-
-    cleaned = raw_path.split(' (deleted)', 1)[0].strip()
-    if not cleaned:
-        return None
-
-    dir_str = str(directory_resolved)
-    if not os.path.isabs(cleaned):
-        absolute_str = os.path.normpath(os.path.join(dir_str, cleaned))
-    else:
-        absolute_str = os.path.normpath(cleaned)
-
-    try:
-        relative = os.path.relpath(absolute_str, dir_str)
-    except ValueError:
-        return None
-
-    if relative == '.':
-        return None
-    if relative.startswith('..'):
-        return None
-    if os.sep in relative:
-        return None
-
-    resolved_str = os.path.realpath(absolute_str)
-    return Path(absolute_str), Path(resolved_str)
-
 
 def list_open_files_for_directory(directory: Path) -> List[OpenFileEntry]:
-    """Invoke lsof and return open files directly within the given directory."""
-    if not LSOF_ENABLED:
+    """Return cached open file entries for the given directory."""
+    monitor = ensure_process_monitor()
+    if not monitor:
         raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system")
-    command = ["lsof", "-Fpcfn", "+d", str(directory)]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail="Open file inspection is not supported on this system") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Timed out while running lsof") from exc
-
-    # lsof returns 1 when no matches are found.
-    if result.returncode not in (0, 1):
-        detail = result.stderr.strip() or "Unable to inspect open files"
-        raise HTTPException(status_code=500, detail=detail)
-
-    directory_resolved = directory.resolve(strict=False)
-    entries: Dict[str, Dict[str, object]] = {}
-    current_pid: Optional[int] = None
-    current_command: Optional[str] = None
-
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-        field = line[0]
-        value = line[1:]
-
-        if field == 'p':
-            try:
-                current_pid = int(value.strip())
-            except ValueError:
-                current_pid = None
-            current_command = None
-        elif field == 'c':
-            current_command = value.strip()
-        elif field == 'n':
-            if current_pid is None:
-                continue
-            normalized = _normalize_lsof_path(value, directory, directory_resolved)
-            if not normalized:
-                continue
-            absolute_path, resolved_path = normalized
-            if not _is_path_within_root(absolute_path.resolve(strict=False)):
-                continue
-            try:
-                client_path = _absolute_to_client_path(absolute_path)
-            except HTTPException:
-                continue
-            resolved_client: Optional[str] = None
-            if _is_path_within_root(resolved_path.resolve(strict=False)):
-                try:
-                    resolved_client = _absolute_to_client_path(resolved_path)
-                except HTTPException:
-                    resolved_client = None
-            entry = entries.setdefault(
-                client_path,
-                {
-                    "path": client_path,
-                    "resolved_path": resolved_client,
-                    "processes": []
-                }
-            )
-            if resolved_client and not entry.get("resolved_path"):
-                entry["resolved_path"] = resolved_client
-            processes: List[Dict[str, object]] = entry["processes"]  # type: ignore[assignment]
-            if not any(proc.get("pid") == current_pid for proc in processes):
-                processes.append({
-                    "pid": current_pid,
-                    "command": current_command or ""
-                })
-
-    open_files: List[OpenFileEntry] = []
-    for entry in entries.values():
-        processes_data = entry["processes"]  # type: ignore[assignment]
-        if not processes_data:
-            continue
-        resolved_path_value = entry["resolved_path"]
-        open_files.append(
-            OpenFileEntry(
-                path=str(entry["path"]),
-                resolved_path=str(resolved_path_value) if resolved_path_value else None,
-                processes=[OpenFileProcess(**proc) for proc in processes_data]
-            )
-        )
-
-    open_files.sort(key=lambda item: item.path.lower())
-
-    return open_files
+    return monitor.get_entries_for_directory(directory)
 
 
 @app.get("/")

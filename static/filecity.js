@@ -1343,12 +1343,32 @@ class FileCity {
                             return;
                         }
                         const normalized = this.stripTrailingSeparators(String(key));
-                        if (!nextMap.has(normalized)) {
-                            nextMap.set(normalized, processes);
+                        if (!normalized) {
+                            return;
                         }
+                        const entryInfo = nextMap.get(normalized) || { direct: [], aggregate: [] };
+                        entryInfo.direct = this.mergeProcessLists(entryInfo.direct, processes);
+                        nextMap.set(normalized, entryInfo);
                     });
                 });
             }
+
+            const directEntries = Array.from(nextMap.entries());
+            directEntries.forEach(([path, info]) => {
+                if (!info || !Array.isArray(info.direct) || !info.direct.length) {
+                    return;
+                }
+                const segments = path.split('/');
+                for (let i = segments.length - 1; i > 0; i -= 1) {
+                    const parentPath = segments.slice(0, i).join('/');
+                    if (!parentPath) {
+                        continue;
+                    }
+                    const parentInfo = nextMap.get(parentPath) || { direct: [], aggregate: [] };
+                    parentInfo.aggregate = this.mergeProcessLists(parentInfo.aggregate, info.direct);
+                    nextMap.set(parentPath, parentInfo);
+                }
+            });
             this.processPollErrorLogged = false;
         } catch (error) {
             if (!this.processPollErrorLogged) {
@@ -1361,6 +1381,32 @@ class FileCity {
         }
         this.activeProcessMap = nextMap;
         this.updateProcessIndicatorAssignments(this.activeProcessMap);
+    }
+
+    mergeProcessLists(existing = [], incoming = []) {
+        const base = Array.isArray(existing) ? existing : [];
+        const addition = Array.isArray(incoming) ? incoming : [];
+        if (!base.length && !addition.length) {
+            return [];
+        }
+        const result = [];
+        const seen = new Set();
+        const addProcess = (proc) => {
+            if (!proc) {
+                return;
+            }
+            const pid = typeof proc.pid === 'number' ? proc.pid : null;
+            const command = typeof proc.command === 'string' ? proc.command : '';
+            const key = pid !== null ? `pid:${pid}` : `cmd:${command}`;
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            result.push(proc);
+        };
+        base.forEach(addProcess);
+        addition.forEach(addProcess);
+        return result;
     }
 
     stripTrailingSeparators(value) {
@@ -1425,30 +1471,39 @@ class FileCity {
         if (!Array.isArray(this.buildings) || !this.buildings.length) {
             return;
         }
+        const map = activeMap instanceof Map ? activeMap : new Map();
         const now = performance.now();
         this.buildings.forEach((building) => {
             const data = building.userData;
-            if (!data || !data.fileInfo || data.fileInfo.is_directory) {
+            if (!data || !data.fileInfo) {
                 if (data?.processIndicator) {
                     this.removeProcessIndicator(building);
                 }
                 return;
             }
-            const path = data.fileInfo.path ? this.stripTrailingSeparators(data.fileInfo.path) : null;
-            const processes = path ? activeMap.get(path) || activeMap.get(this.stripTrailingSeparators(path)) : null;
-            if (processes && processes.length) {
-                this.ensureProcessIndicator(building, processes, now);
+            const fileInfo = data.fileInfo;
+            const path = fileInfo.path ? this.stripTrailingSeparators(fileInfo.path) : null;
+            const entry = path ? map.get(path) : null;
+            const processes = entry ? (fileInfo.is_directory ? entry.aggregate : entry.direct) : null;
+            const hasActivity = Array.isArray(processes) && processes.length > 0;
+            if (hasActivity) {
+                const variant = fileInfo.is_directory ? 'directory' : 'file';
+                this.ensureProcessIndicator(building, processes, now, { variant });
             } else if (data.processIndicator) {
                 this.removeProcessIndicator(building);
             }
         });
     }
 
-    ensureProcessIndicator(building, processes, now = performance.now()) {
+    ensureProcessIndicator(building, processes, now = performance.now(), options = {}) {
         const data = building.userData;
+        const variant = options.variant || 'file';
         let indicator = data.processIndicator;
-        if (!indicator) {
-            indicator = this.createProcessIndicator(building);
+        if (!indicator || indicator.variant !== variant) {
+            if (indicator) {
+                this.removeProcessIndicator(building, true);
+            }
+            indicator = this.createProcessIndicator(building, { variant });
             data.processIndicator = indicator;
         }
         indicator.radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
@@ -1456,15 +1511,21 @@ class FileCity {
         this.refreshProcessIndicatorConstraints(building, indicator, now);
         indicator.processes = processes;
         indicator.lastActive = now;
+        indicator.variant = variant;
         if (!indicator.initialized) {
             indicator.initialized = true;
         }
     }
 
-    createProcessIndicator(building) {
+    createProcessIndicator(building, options = {}) {
         const data = building.userData;
         const radius = Math.max(0.8, Math.min(this.gridSpacing * 0.45, (data.baseSize ?? 2.4) * 0.9 + 0.6));
         const size = Math.max(0.4, Math.min(1.2, (data.baseSize ?? 2.4) * 0.3));
+
+        const variant = options.variant || 'file';
+        const isDirectoryVariant = variant === 'directory';
+        const edgeBaseHex = isDirectoryVariant ? 0x9c4dff : 0xff4a1f;
+        const edgeGlowHex = isDirectoryVariant ? 0xe2c4ff : 0xffc266;
 
         const geometry = new THREE.DodecahedronGeometry(size);
         const fillMaterial = new THREE.MeshBasicMaterial({
@@ -1483,6 +1544,7 @@ class FileCity {
             blending: THREE.AdditiveBlending,
             depthWrite: false
         });
+        edgeMaterial.color = new THREE.Color(edgeBaseHex);
         const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry.clone()), edgeMaterial);
 
         const group = new THREE.Group();
@@ -1520,8 +1582,9 @@ class FileCity {
             pulseOffset: Math.random() * Math.PI * 2,
             initialized: false,
             lastActive: now,
-            edgeBaseColor: new THREE.Color(0xff4a1f),
-            edgeGlowColor: new THREE.Color(0xffc266)
+            edgeBaseColor: new THREE.Color(edgeBaseHex),
+            edgeGlowColor: new THREE.Color(edgeGlowHex),
+            variant
         };
     }
 
